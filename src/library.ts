@@ -8,6 +8,12 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import {
+  attachHover, tickHover,
+  addUnderglow,
+  makeThrusterTrail, tickThrusters,
+  polishCarMaterials,
+} from './shared/scene';
 
 interface AssetEntry {
   category: 'vehicle';
@@ -20,16 +26,6 @@ interface AssetEntry {
   notes?: string;
 }
 
-// Reusable: lift + spin so a "flying" asset reads as flying instead of static.
-function attachHover(obj: THREE.Object3D, opts: { liftHeight?: number; baseY?: number; bobAmplitude?: number; spinSpeed?: number } = {}) {
-  const lift = opts.liftHeight ?? 1.4;
-  const baseY = opts.baseY ?? 0;
-  const amp = opts.bobAmplitude ?? 0.12;
-  const spin = opts.spinSpeed ?? 0.18; // radians/sec
-  obj.position.y = baseY + lift;
-  (obj.userData as any).hover = { baseY, lift, amp, spin };
-}
-
 const ASSETS: AssetEntry[] = [
   {
     category: 'vehicle',
@@ -39,34 +35,15 @@ const ASSETS: AssetEntry[] = [
     notes: "Designersoup Low Poly Car Pack — DeLorean homage. Flight effects added: hover, spin, neon underglow, particle thruster trail.",
     async build(loader) {
       const car = await loader.loadAsync('/models/docLorean.fbx');
-      // FBX from this pack ships at ~100x scale; bring it down so it fits the
-      // preview pad without needing a giant camera.
+      // FBX from this pack ships at ~100x scale; bring it down to match the pad.
       car.scale.setScalar(0.01);
-      // Brighten the materials so the dark gallery doesn't make it look flat.
-      car.traverse((node) => {
-        const mesh = node as THREE.Mesh;
-        if (!(mesh as any).isMesh) return;
-        const mat = mesh.material as THREE.MeshStandardMaterial | THREE.MeshStandardMaterial[];
-        const tweak = (m: THREE.MeshStandardMaterial) => {
-          m.metalness = 0.55;
-          m.roughness = 0.35;
-          m.envMapIntensity = 1.2;
-        };
-        if (Array.isArray(mat)) mat.forEach(tweak); else if (mat) tweak(mat as THREE.MeshStandardMaterial);
-      });
+      polishCarMaterials(car);
 
       const group = new THREE.Group();
       group.name = 'docLorean-flying';
       group.add(car);
+      addUnderglow(group);
 
-      // Neon underglow — rectangular point lights kissing the underside.
-      const glowFront = new THREE.PointLight(0x6dd5ff, 1.5, 5, 2);
-      glowFront.position.set(0, -0.4, 0.6);
-      const glowRear  = new THREE.PointLight(0xe879f9, 1.5, 5, 2);
-      glowRear.position.set(0, -0.4, -0.6);
-      group.add(glowFront, glowRear);
-
-      // Thruster trail — a small cone of additive sparks behind the car.
       const trail = makeThrusterTrail();
       trail.position.set(0, 0.05, -0.85);
       trail.rotation.x = Math.PI / 2;
@@ -77,32 +54,6 @@ const ASSETS: AssetEntry[] = [
     },
   },
 ];
-
-function makeThrusterTrail(): THREE.Points {
-  const N = 80;
-  const positions = new Float32Array(N * 3);
-  const seeds = new Float32Array(N);
-  for (let i = 0; i < N; i++) {
-    seeds[i] = Math.random();
-    positions[i * 3 + 0] = (Math.random() - 0.5) * 0.18;
-    positions[i * 3 + 1] = -Math.random() * 1.4;
-    positions[i * 3 + 2] = (Math.random() - 0.5) * 0.18;
-  }
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
-  const mat = new THREE.PointsMaterial({
-    color: 0x6dd5ff,
-    size: 0.06,
-    transparent: true,
-    opacity: 0.85,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  });
-  const points = new THREE.Points(geom, mat);
-  (points.userData as any).thruster = { positions, seeds };
-  return points;
-}
 
 // ---- Boot ----
 
@@ -244,30 +195,8 @@ function tick() {
   const dt = clock.getDelta();
   const t = clock.getElapsedTime();
   if (activeAsset) {
-    const hover = (activeAsset.userData as any).hover as
-      | { baseY: number; lift: number; amp: number; spin: number } | undefined;
-    if (hover) {
-      activeAsset.position.y = hover.baseY + hover.lift + Math.sin(t * 1.6) * hover.amp;
-      activeAsset.rotation.y += dt * hover.spin;
-    }
-    activeAsset.traverse((node) => {
-      const trail = node as any;
-      if (trail.isPoints && trail.userData?.thruster) {
-        const { positions, seeds } = trail.userData.thruster as {
-          positions: Float32Array; seeds: Float32Array;
-        };
-        const attr = (trail.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
-        for (let i = 0; i < seeds.length; i++) {
-          // Drift particles down along Z (thruster direction); recycle when they fade.
-          const phase = (t * 1.4 + seeds[i]!) % 1;
-          positions[i * 3 + 1] = -phase * 1.4;
-          attr.setXYZ(i, positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
-        }
-        attr.needsUpdate = true;
-        const mat = trail.material as THREE.PointsMaterial;
-        mat.opacity = 0.7 + 0.2 * Math.sin(t * 8);
-      }
-    });
+    tickHover(activeAsset, dt, t);
+    tickThrusters(activeAsset, dt, t);
   }
   controls.update();
   renderer.render(scene, camera);
