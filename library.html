@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Asset Library — Car Personal Website</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; background: #060912; color: #e5e7eb;
+        font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+      #app { display: grid; grid-template-columns: 1fr 320px; height: 100vh; }
+      #canvas-wrap { position: relative; }
+      #lib-canvas { display: block; width: 100%; height: 100%; }
+
+      #title-bar {
+        position: absolute; top: 16px; left: 16px;
+        font-size: 13px; letter-spacing: 1px; text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.55);
+      }
+      #title-bar a { color: #93c5fd; text-decoration: none; }
+
+      #sidebar {
+        background: #0a0e18;
+        border-left: 1px solid rgba(255, 255, 255, 0.06);
+        overflow-y: auto;
+        padding: 16px 12px;
+      }
+      #sidebar::-webkit-scrollbar { width: 6px; }
+      #sidebar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+
+      .lib-section { margin-bottom: 18px; }
+      .lib-section h2 {
+        font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.4); margin: 0 0 6px 4px;
+      }
+      .lib-row {
+        display: grid;
+        grid-template-columns: 12px 1fr auto;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .lib-row:hover { background: rgba(255, 255, 255, 0.04); }
+      .lib-row.active { background: rgba(99, 102, 241, 0.18); }
+      .lib-dot { width: 8px; height: 8px; border-radius: 50%; }
+      .lib-meta { color: rgba(255, 255, 255, 0.4); font-size: 11px; }
+
+      #info-panel {
+        position: absolute; bottom: 16px; left: 16px;
+        max-width: 380px;
+        background: rgba(10, 14, 24, 0.85);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 12px 14px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: rgba(255, 255, 255, 0.7);
+      }
+      #info-panel h3 { margin: 0 0 4px; font-size: 14px; color: #fff; }
+      #info-panel .info-meta { color: rgba(255, 255, 255, 0.4); font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="canvas-wrap">
+        <canvas id="lib-canvas"></canvas>
+        <div id="title-bar">
+          <a href="/">← home</a> &nbsp; <span>Asset Library</span>
+        </div>
+        <div id="info-panel">
+          <h3 id="info-name">—</h3>
+          <div class="info-meta" id="info-source">—</div>
+          <div id="info-notes" style="margin-top: 6px;"></div>
+        </div>
+      </div>
+      <aside id="sidebar"></aside>
+    </div>
+    <script type="module" src="/src/library.ts"></script>
+  </body>
+</html>
