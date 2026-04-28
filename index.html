@@ -3,721 +3,277 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Aiden Zegil — Garage of the Future</title>
-    <meta name="description" content="A late-night automotive poster. Aiden Zegil's personal site, themed around favorite cars." />
+    <title>Aiden Zegil — Pilot the docLorean</title>
+    <meta name="description" content="WASD to fly, Space to boost. A pilotable docLorean by Aiden Zegil." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-
-    <!-- Distinctive type pairing: condensed display sans + italic display
-         serif for accent numerals + technical mono for labels. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Antonio:wght@200;400;700;900&family=Cormorant+Garamond:ital,wght@0,300;0,500;1,300;1,500&family=JetBrains+Mono:wght@300;500&display=swap"
-      rel="stylesheet"
-    />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 
     <style>
-      /* ───────────────── Tokens ───────────────── */
       :root {
-        --ink:     #07090f;
-        --ink-2:   #0d111c;
-        --ink-3:   #131727;
+        --ink:     #050810;
         --paper:   #efe9d8;
-        --paper-d: rgba(239, 233, 216, 0.7);
-        --paper-m: rgba(239, 233, 216, 0.42);
+        --paper-d: rgba(239, 233, 216, 0.65);
+        --paper-m: rgba(239, 233, 216, 0.4);
         --paper-f: rgba(239, 233, 216, 0.18);
-        --rule:    rgba(239, 233, 216, 0.12);
         --cyan:    #6dd5ff;
         --magenta: #e879f9;
         --amber:   #ffb547;
         --red:     #ff4f5e;
-
-        --display: 'Antonio', 'Bebas Neue', sans-serif;
-        --serif:   'Cormorant Garamond', 'Times New Roman', serif;
-        --mono:    'JetBrains Mono', ui-monospace, monospace;
+        --rule:    rgba(239, 233, 216, 0.14);
+        --mono: 'JetBrains Mono', ui-monospace, monospace;
       }
-
       *, *::before, *::after { box-sizing: border-box; }
-      html, body { margin: 0; padding: 0; }
+      html, body { margin: 0; padding: 0; height: 100%; }
       body {
         background: var(--ink);
         color: var(--paper);
-        font-family: var(--display);
-        font-weight: 200;
-        letter-spacing: 0.01em;
+        font-family: var(--mono);
+        font-weight: 400;
+        overflow: hidden;
         -webkit-font-smoothing: antialiased;
-        text-rendering: optimizeLegibility;
-        overflow-x: hidden;
       }
-      a { color: inherit; text-decoration: none; }
+      a { color: var(--cyan); text-decoration: none; }
+      a:hover { text-decoration: underline; text-decoration-color: var(--cyan); }
 
-      /* Page-wide film grain — a tiny noise SVG repeated, blended additively.
-         Sells the "printed late-night magazine" vibe more than any animation. */
-      body::after {
+      /* Full-bleed canvas. */
+      #stage { position: fixed; inset: 0; }
+      #hero-canvas { display: block; width: 100%; height: 100%; }
+
+      /* Subtle grain overlay so the dark plane isn't perfectly flat. */
+      #stage::after {
         content: '';
-        position: fixed; inset: 0;
+        position: absolute; inset: 0;
         pointer-events: none;
-        z-index: 9999;
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='4'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.16 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
-        opacity: 0.4;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.15 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+        opacity: 0.35;
         mix-blend-mode: overlay;
       }
 
-      /* Subtle scanline behind everything for additional atmosphere. */
-      body::before {
-        content: '';
-        position: fixed; inset: 0;
+      /* ── HUD ── */
+      .hud {
+        position: fixed;
+        z-index: 10;
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--paper-d);
         pointer-events: none;
-        z-index: 1;
-        background:
-          radial-gradient(ellipse at 20% 30%, rgba(109, 213, 255, 0.10), transparent 55%),
-          radial-gradient(ellipse at 85% 70%, rgba(232, 121, 249, 0.10), transparent 55%),
-          repeating-linear-gradient(
-            to bottom,
-            transparent 0,
-            transparent 2px,
-            rgba(255, 255, 255, 0.014) 2px,
-            rgba(255, 255, 255, 0.014) 3px
-          );
       }
 
-      /* ───────────────── Masthead ───────────────── */
-      .masthead {
-        position: relative;
-        z-index: 5;
-        display: grid;
-        grid-template-columns: 1fr auto 1fr;
-        align-items: center;
-        gap: 32px;
-        padding: 18px 32px 14px;
-        border-bottom: 1px solid var(--rule);
-        font-family: var(--mono);
-        font-weight: 300;
-        font-size: 11px;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-      }
-      .masthead .left,
-      .masthead .right {
-        display: flex; gap: 18px;
-        white-space: nowrap;
-      }
-      .masthead .right { justify-content: flex-end; }
-      .masthead em {
-        color: var(--cyan); font-style: normal;
-        font-family: var(--mono);
-      }
-      .masthead .badge {
-        font-family: var(--display);
-        font-weight: 900;
-        font-size: 13px;
-        letter-spacing: 0.32em;
-        color: var(--paper);
-      }
+      .hud strong { color: var(--paper); font-weight: 700; }
+      .hud em { font-style: normal; color: var(--cyan); }
 
-      /* Animated "live" pip in the masthead. */
-      .live-pip {
+      /* Top-left: identity. */
+      .hud.tl { top: 22px; left: 26px; line-height: 1.7; }
+      .hud.tl .name { font-size: 14px; letter-spacing: 0.32em; color: var(--paper); }
+      .hud.tl .sub  { color: var(--paper-m); }
+      .hud.tl .sub a { letter-spacing: 0.2em; }
+
+      /* Top-right: GitHub + library link. */
+      .hud.tr { top: 22px; right: 26px; text-align: right; line-height: 1.7; pointer-events: auto; }
+      .hud.tr .lib {
         display: inline-block;
-        width: 6px; height: 6px;
-        border-radius: 50%;
-        background: var(--red);
-        margin-right: 6px;
-        box-shadow: 0 0 10px var(--red);
-        animation: live-blink 1.4s infinite;
-        vertical-align: 1px;
-      }
-      @keyframes live-blink {
-        0%, 60% { opacity: 1; }
-        70%, 100% { opacity: 0.25; }
-      }
-
-      /* ───────────────── Hero ───────────────── */
-      .hero {
-        position: relative;
-        z-index: 2;
-        min-height: calc(100vh - 56px);
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
-        align-items: stretch;
-      }
-
-      /* Big rotated rail label to the left of the page — "ISSUE 01" */
-      .hero-rail {
-        position: absolute;
-        left: 18px; top: 50%;
-        transform: translate(-50%, -50%) rotate(-90deg);
-        transform-origin: center;
-        font-family: var(--mono);
-        font-size: 11px;
-        letter-spacing: 0.42em;
-        text-transform: uppercase;
-        color: var(--paper-f);
-        white-space: nowrap;
-        z-index: 6;
-      }
-      .hero-rail span { color: var(--cyan); }
-
-      /* ── Left column: copy + CTA ── */
-      .hero-copy {
-        position: relative;
-        padding: 64px 56px 56px 88px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 30px;
-      }
-
-      .eyebrow {
-        font-family: var(--mono);
-        font-weight: 500;
-        font-size: 11px;
-        letter-spacing: 0.32em;
-        text-transform: uppercase;
-        color: var(--paper-d);
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-      .eyebrow::before {
-        content: '';
-        width: 36px; height: 1px; background: var(--cyan);
-      }
-
-      h1.title {
-        margin: 0;
-        font-family: var(--display);
-        font-weight: 900;
-        font-style: italic;
-        font-size: clamp(64px, 12vw, 200px);
-        line-height: 0.84;
-        letter-spacing: -0.015em;
+        margin-top: 4px;
+        padding: 6px 12px;
+        border: 1px solid var(--paper-f);
         color: var(--paper);
-        text-transform: uppercase;
-        position: relative;
+        transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
       }
-      h1.title span {
-        display: block;
-        opacity: 0;
-        transform: translateY(40px) skewX(-2deg);
-        animation: title-rise 900ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
-      }
-      h1.title span:nth-child(1) { animation-delay: 80ms; }
-      h1.title span:nth-child(2) { animation-delay: 200ms; color: var(--paper-d); -webkit-text-stroke: 1px var(--paper-d); -webkit-text-fill-color: transparent; padding-left: 0.6ch; }
-      h1.title span:nth-child(3) { animation-delay: 340ms; color: var(--cyan); padding-left: 1.2ch; }
-      @keyframes title-rise {
-        to { opacity: 1; transform: translateY(0) skewX(0); }
-      }
-
-      h1.title em.serif {
-        font-family: var(--serif);
-        font-style: italic;
-        font-weight: 300;
-        font-size: 0.5em;
-        letter-spacing: 0;
-        color: var(--magenta);
-        margin-left: 0.4ch;
-        text-transform: lowercase;
-        vertical-align: 0.4em;
-      }
-
-      .lede {
-        font-family: var(--display);
-        font-weight: 200;
-        font-size: 18px;
-        line-height: 1.55;
-        letter-spacing: 0.005em;
-        color: var(--paper-d);
-        max-width: 460px;
-        opacity: 0;
-        transform: translateY(20px);
-        animation: fade-up 700ms ease-out 540ms forwards;
-      }
-      .lede strong { color: var(--paper); font-weight: 700; }
-      @keyframes fade-up {
-        to { opacity: 1; transform: translateY(0); }
-      }
-
-      .cta-row {
-        display: flex; gap: 18px;
-        flex-wrap: wrap;
-        opacity: 0;
-        animation: fade-up 700ms ease-out 720ms forwards;
-      }
-
-      .cta {
-        position: relative;
-        display: inline-flex;
-        align-items: center;
-        gap: 14px;
-        padding: 16px 22px 16px 24px;
-        font-family: var(--mono);
-        font-weight: 500;
-        font-size: 12px;
-        letter-spacing: 0.26em;
-        text-transform: uppercase;
-        color: var(--ink);
-        background: var(--paper);
-        border: 1px solid var(--paper);
-        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
-        transition: transform 0.25s ease, background 0.25s ease, color 0.25s ease;
-      }
-      .cta:hover {
-        transform: translate(2px, -2px);
-        background: var(--cyan);
-        color: var(--ink);
-      }
-      .cta .arrow {
-        display: inline-block;
-        transition: transform 0.25s ease;
-      }
-      .cta:hover .arrow { transform: translateX(6px); }
-
-      .cta--ghost {
-        color: var(--paper);
-        background: transparent;
-        border-color: var(--paper-f);
-      }
-      .cta--ghost:hover {
-        background: transparent;
-        color: var(--cyan);
+      .hud.tr .lib:hover {
         border-color: var(--cyan);
+        color: var(--cyan);
+        background: rgba(109, 213, 255, 0.06);
+        text-decoration: none;
       }
 
-      /* Hero meta block under the CTA. */
-      .hero-meta {
-        margin-top: 36px;
+      /* Bottom-left: control hints. Big enough to be the primary instruction. */
+      .hud.bl {
+        bottom: 26px; left: 26px;
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, auto));
-        gap: 28px;
+        gap: 6px;
+        line-height: 1.55;
+      }
+      .key-hints { display: flex; gap: 12px; align-items: center; }
+      .kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 28px;
+        height: 26px;
+        padding: 0 8px;
+        border: 1px solid var(--paper-f);
+        border-bottom-width: 2px;
+        border-radius: 4px;
         font-family: var(--mono);
-        font-weight: 300;
         font-size: 11px;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-        opacity: 0;
-        animation: fade-up 700ms ease-out 900ms forwards;
+        font-weight: 500;
+        letter-spacing: 0.05em;
+        color: var(--paper);
+        text-transform: none;
+        background: rgba(239, 233, 216, 0.04);
       }
-      .hero-meta dt { color: var(--paper-f); margin-bottom: 6px; }
-      .hero-meta dd { margin: 0; color: var(--paper); font-weight: 500; letter-spacing: 0.08em; }
-      .hero-meta dd .num { font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 22px; color: var(--cyan); margin-right: 4px; vertical-align: -2px; }
+      .kbd-row { display: inline-flex; gap: 4px; }
+      .key-label { color: var(--paper-m); margin-left: 8px; }
 
-      /* ── Right column: 3D canvas + decorations ── */
-      .hero-stage {
-        position: relative;
-        min-height: 540px;
-        overflow: hidden;
-        border-left: 1px solid var(--rule);
-      }
-      #hero-canvas {
-        position: absolute; inset: 0;
-        width: 100%; height: 100%;
-        display: block;
-      }
-
-      /* Corner brackets on the canvas — "viewfinder" feel. */
-      .hero-stage .bracket {
-        position: absolute;
-        width: 28px; height: 28px;
-        border: 1px solid var(--paper-d);
-        pointer-events: none;
-      }
-      .hero-stage .bracket.tl { top: 18px;  left: 18px;  border-right: 0; border-bottom: 0; }
-      .hero-stage .bracket.tr { top: 18px;  right: 18px; border-left: 0;  border-bottom: 0; }
-      .hero-stage .bracket.bl { bottom: 18px; left: 18px; border-right: 0; border-top: 0; }
-      .hero-stage .bracket.br { bottom: 18px; right: 18px; border-left: 0; border-top: 0; }
-
-      .hero-stage .stage-meta {
-        position: absolute;
-        top: 22px;
-        right: 56px;
+      /* Bottom-right: telemetry + boost bar. */
+      .hud.br {
+        bottom: 26px; right: 26px;
+        display: grid;
+        gap: 12px;
         text-align: right;
-        font-family: var(--mono);
-        font-weight: 300;
-        font-size: 10px;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        color: var(--paper-m);
+        min-width: 220px;
       }
-      .hero-stage .stage-meta strong { color: var(--cyan); font-weight: 500; }
 
-      .hero-stage .caption {
-        position: absolute;
-        bottom: 26px;
-        left: 28px;
-        right: 28px;
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        gap: 18px;
+      .readout { display: grid; grid-template-columns: 1fr auto; gap: 4px 18px; }
+      .readout dt { color: var(--paper-m); }
+      .readout dd { margin: 0; color: var(--paper); }
+      .readout dd .num {
         font-family: var(--mono);
-        font-weight: 300;
-        font-size: 10px;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-      }
-      .hero-stage .caption .name {
-        font-family: var(--display);
-        font-style: italic;
         font-weight: 700;
         font-size: 18px;
-        text-transform: none;
-        letter-spacing: 0;
-        color: var(--paper);
-      }
-      .hero-stage .caption .name span {
-        font-family: var(--serif);
-        font-style: italic;
-        font-weight: 500;
-        color: var(--magenta);
-      }
-
-      /* ───────────────── Loadout (numbered list) ───────────────── */
-      .loadout {
-        position: relative;
-        z-index: 2;
-        padding: 96px 56px 80px 88px;
-        border-top: 1px solid var(--rule);
-      }
-
-      .loadout-head {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 24px;
-        margin-bottom: 28px;
-        padding-bottom: 16px;
-        border-bottom: 1px solid var(--rule);
-      }
-      .loadout-head h2 {
-        margin: 0;
-        font-family: var(--display);
-        font-weight: 900;
-        font-size: clamp(40px, 7vw, 88px);
-        line-height: 0.9;
         letter-spacing: -0.01em;
-        text-transform: uppercase;
         color: var(--paper);
       }
-      .loadout-head h2 em {
-        font-family: var(--serif);
-        font-style: italic;
-        font-weight: 300;
-        color: var(--amber);
-        font-size: 0.78em;
-      }
-      .loadout-head .index {
-        font-family: var(--mono);
-        font-size: 11px;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-      }
 
-      .loadout ol {
-        list-style: none;
-        margin: 0; padding: 0;
-        counter-reset: loadout;
-      }
-      .loadout li {
-        counter-increment: loadout;
+      /* Boost bar — drains while active, refills on cooldown. */
+      .boost {
         display: grid;
-        grid-template-columns: 100px minmax(0, 1.4fr) minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 32px;
-        padding: 22px 0;
-        border-bottom: 1px dashed var(--rule);
-        cursor: default;
-        transition: background 0.2s ease, padding-left 0.25s ease;
+        grid-template-rows: auto auto;
+        gap: 6px;
+      }
+      .boost-track {
         position: relative;
-      }
-      .loadout li:hover {
-        padding-left: 16px;
-        background: linear-gradient(90deg, rgba(109, 213, 255, 0.05), transparent 60%);
-      }
-      .loadout li::before {
-        content: counter(loadout, decimal-leading-zero);
-        font-family: var(--serif);
-        font-style: italic;
-        font-weight: 500;
-        font-size: 64px;
-        color: var(--paper-f);
-        line-height: 1;
-        transition: color 0.25s ease, transform 0.25s ease;
-      }
-      .loadout li:hover::before { color: var(--cyan); transform: translateX(4px); }
-      .loadout li.featured::before { color: var(--magenta); }
-
-      .loadout .name {
-        font-family: var(--display);
-        font-weight: 700;
-        font-size: 28px;
-        letter-spacing: -0.01em;
-        text-transform: uppercase;
-        color: var(--paper);
-      }
-      .loadout .name em {
-        font-family: var(--serif);
-        font-style: italic;
-        font-weight: 500;
-        font-size: 0.7em;
-        color: var(--amber);
-        text-transform: lowercase;
-        margin-left: 8px;
-      }
-      .loadout .blurb {
-        font-family: var(--display);
-        font-weight: 200;
-        font-size: 14px;
-        line-height: 1.6;
-        color: var(--paper-d);
-      }
-      .loadout .tag {
-        font-family: var(--mono);
-        font-weight: 500;
-        font-size: 10px;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-        white-space: nowrap;
-      }
-      .loadout .tag.live { color: var(--cyan); }
-      .loadout .tag.tbd  { color: var(--paper-f); }
-
-      /* ───────────────── Footer ticker ───────────────── */
-      .ticker {
-        position: relative;
-        z-index: 2;
-        border-top: 1px solid var(--rule);
-        font-family: var(--mono);
-        font-weight: 300;
-        font-size: 11px;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-        white-space: nowrap;
+        height: 6px;
+        background: var(--paper-f);
+        border-radius: 3px;
         overflow: hidden;
       }
-      .ticker-track {
-        display: inline-flex;
-        gap: 56px;
-        padding: 16px 0;
-        animation: ticker-slide 38s linear infinite;
+      #hud-boost-fill {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, var(--cyan) 0%, var(--magenta) 100%);
+        transform-origin: left center;
+        transform: scaleX(1);
+        transition: transform 0.08s linear;
       }
-      .ticker-track > span {
-        display: inline-flex; align-items: center; gap: 16px;
-      }
-      .ticker-track > span::after {
-        content: '◆';
-        color: var(--magenta);
-        opacity: 0.55;
-      }
-      @keyframes ticker-slide {
-        from { transform: translateX(0); }
-        to   { transform: translateX(-50%); }
-      }
-
-      /* Footer credits row. */
-      footer.colophon {
-        position: relative;
-        z-index: 2;
-        padding: 28px 56px 36px 88px;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 18px;
-        border-top: 1px solid var(--rule);
-        font-family: var(--mono);
-        font-weight: 300;
-        font-size: 11px;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        color: var(--paper-m);
-      }
-      footer.colophon .end {
+      #hud-boost-label {
         text-align: right;
+        font-size: 10px;
+        letter-spacing: 0.28em;
       }
-      footer.colophon a:hover { color: var(--cyan); }
+      #hud-boost-label[data-state="active"]   { color: var(--amber); }
+      #hud-boost-label[data-state="cooldown"] { color: var(--paper-m); }
+      #hud-boost-label[data-state="ready"]    { color: var(--cyan); }
 
-      /* ───────────────── Responsive ───────────────── */
-      @media (max-width: 880px) {
-        .masthead { grid-template-columns: 1fr; gap: 8px; padding: 14px 22px; }
-        .masthead .right { justify-content: flex-start; }
-        .hero { grid-template-columns: 1fr; }
-        .hero-rail { display: none; }
-        .hero-copy { padding: 36px 24px 24px; gap: 22px; }
-        .hero-stage { min-height: 60vh; border-left: 0; border-top: 1px solid var(--rule); }
-        .loadout { padding: 56px 24px; }
-        .loadout li { grid-template-columns: 60px 1fr auto; gap: 18px; padding: 18px 0; }
-        .loadout li::before { font-size: 40px; }
-        .loadout .blurb { display: none; }
-        footer.colophon { padding: 22px 24px; grid-template-columns: 1fr; }
-        footer.colophon .end { text-align: left; }
+      /* Center hint: appears on first load, fades after a few seconds. */
+      .splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 5;
+        pointer-events: none;
+        animation: splash-fade 5.5s ease-out forwards;
+      }
+      .splash-card {
+        text-align: center;
+        font-family: var(--mono);
+        letter-spacing: 0.32em;
+        text-transform: uppercase;
+        color: var(--paper-d);
+        font-size: 11px;
+        padding: 14px 20px;
+        border: 1px solid var(--paper-f);
+        border-radius: 4px;
+        background: rgba(5, 8, 16, 0.55);
+        backdrop-filter: blur(6px);
+      }
+      .splash-card strong {
+        display: block;
+        font-size: 14px;
+        margin-bottom: 6px;
+        color: var(--paper);
+        letter-spacing: 0.4em;
+      }
+      @keyframes splash-fade {
+        0%, 60%   { opacity: 1; transform: translateY(0); }
+        100%      { opacity: 0; transform: translateY(-12px); }
+      }
+
+      @media (max-width: 720px) {
+        .hud.tl, .hud.tr { font-size: 10px; }
+        .hud.tl .name { font-size: 12px; }
+        .hud.bl { left: 18px; bottom: 18px; }
+        .hud.br { right: 18px; bottom: 18px; min-width: 0; }
+        .splash-card { padding: 10px 14px; }
       }
     </style>
   </head>
   <body>
-    <!-- ───────────────── Masthead ───────────────── -->
-    <header class="masthead">
-      <div class="left">
-        <span><span class="live-pip"></span>Live</span>
-        <span>Iss. <em>01</em></span>
-        <span>Late Night Edition</span>
-      </div>
-      <div class="badge">A · Z · GARAGE</div>
-      <div class="right">
-        <span>Lat <em>40.7128°</em></span>
-        <span>Long <em>−74.0060°</em></span>
-        <span id="clock-cell">00:00:00</span>
-      </div>
-    </header>
+    <div id="stage">
+      <canvas id="hero-canvas"></canvas>
+    </div>
 
-    <!-- ───────────────── Hero ───────────────── -->
-    <section class="hero">
-      <div class="hero-rail">ISSUE 01 // <span>VEHICLE OBSESSIONS</span></div>
+    <!-- HUD: identity / link / controls / telemetry -->
+    <div class="hud tl">
+      <div class="name">A · Z · GARAGE</div>
+      <div class="sub">Aiden Zegil — pilot the docLorean</div>
+      <div class="sub"><a href="https://github.com/aidenzegil/car-personal-website" target="_blank" rel="noopener">github →</a></div>
+    </div>
 
-      <div class="hero-copy">
-        <p class="eyebrow">A field guide to favorite cars</p>
+    <div class="hud tr">
+      <div>Subj. <strong>docLorean</strong></div>
+      <div>FX <em>neon · hover · afterburner</em></div>
+      <a class="lib" href="/library.html">Asset library →</a>
+    </div>
 
-        <h1 class="title">
-          <span>Garage</span>
-          <span>of the</span>
-          <span>Future<em class="serif">/</em></span>
-        </h1>
-
-        <p class="lede">
-          A late-night logbook of the vehicles I can't stop thinking about —
-          from time-traveling DeLoreans to whatever I'm into this week.
-          <strong>Aiden Zegil's</strong> field guide, rendered in low-poly,
-          shipped at 2 a.m.
-        </p>
-
-        <div class="cta-row">
-          <a class="cta" href="/library.html">
-            Enter the asset library
-            <span class="arrow">→</span>
-          </a>
-          <a class="cta cta--ghost" href="#loadout">
-            Read the loadout
-            <span class="arrow">↓</span>
-          </a>
+    <div class="hud bl">
+      <div class="key-hints">
+        <div class="kbd-row">
+          <span class="kbd">W</span>
         </div>
-
-        <dl class="hero-meta">
-          <div>
-            <dt>Featured</dt>
-            <dd><span class="num">01</span>docLorean</dd>
-          </div>
-          <div>
-            <dt>On the bench</dt>
-            <dd><span class="num">04</span>more cars</dd>
-          </div>
-          <div>
-            <dt>Stack</dt>
-            <dd>Three.js · Vite · TS</dd>
-          </div>
-        </dl>
+        <span class="key-label">Forward</span>
       </div>
-
-      <div class="hero-stage">
-        <canvas id="hero-canvas"></canvas>
-        <div class="bracket tl"></div>
-        <div class="bracket tr"></div>
-        <div class="bracket bl"></div>
-        <div class="bracket br"></div>
-
-        <div class="stage-meta">
-          <div><strong>SUBJ.</strong> docLorean — flying hover model</div>
-          <div>RIG · Three.js / FBXLoader</div>
-          <div>FX · neon underglow + thruster trail</div>
+      <div class="key-hints">
+        <div class="kbd-row">
+          <span class="kbd">A</span>
+          <span class="kbd">S</span>
+          <span class="kbd">D</span>
         </div>
-
-        <div class="caption">
-          <div class="name">docLorean <span>flying</span></div>
-          <div>Plate · A-Z · 88 MPH</div>
+        <span class="key-label">Steer · reverse</span>
+      </div>
+      <div class="key-hints">
+        <div class="kbd-row">
+          <span class="kbd" style="min-width: 96px;">Space</span>
         </div>
-      </div>
-    </section>
-
-    <!-- ───────────────── Loadout ───────────────── -->
-    <section class="loadout" id="loadout">
-      <div class="loadout-head">
-        <h2>The <em>loadout</em></h2>
-        <span class="index">Five spots / one filled</span>
-      </div>
-
-      <ol>
-        <li class="featured">
-          <div class="name">docLorean <em>(flying)</em></div>
-          <div class="blurb">DeLorean homage from the Designersoup pack — neon undercarriage, particle thrusters, hovers like it forgot the road exists.</div>
-          <div class="tag live">Live in library</div>
-        </li>
-        <li>
-          <div class="name">[ Your pick &nbsp;1 ]</div>
-          <div class="blurb">Drop a car name + a one-line "why" here when you find your next obsession.</div>
-          <div class="tag tbd">TBD</div>
-        </li>
-        <li>
-          <div class="name">[ Your pick &nbsp;2 ]</div>
-          <div class="blurb">Slot for the next FBX you import. Add it to <code>public/models/</code> and ASSETS in <code>library.ts</code>.</div>
-          <div class="tag tbd">TBD</div>
-        </li>
-        <li>
-          <div class="name">[ Your pick &nbsp;3 ]</div>
-          <div class="blurb">Maybe the Land Rover from the same pack. Maybe something stranger.</div>
-          <div class="tag tbd">TBD</div>
-        </li>
-        <li>
-          <div class="name">[ Your pick &nbsp;4 ]</div>
-          <div class="blurb">Save the last spot for whatever shows up in your dreams this month.</div>
-          <div class="tag tbd">TBD</div>
-        </li>
-      </ol>
-    </section>
-
-    <!-- ───────────────── Footer ticker ───────────────── -->
-    <div class="ticker" aria-hidden="true">
-      <div class="ticker-track">
-        <!-- Repeated x2 so the loop is seamless. -->
-        <span>Volume 01</span>
-        <span>Late night logbook</span>
-        <span>88 mph minimum</span>
-        <span>Print + WebGL</span>
-        <span>1.21 GW</span>
-        <span>Built in TS</span>
-        <span>Aiden Zegil 2026</span>
-        <span>Volume 01</span>
-        <span>Late night logbook</span>
-        <span>88 mph minimum</span>
-        <span>Print + WebGL</span>
-        <span>1.21 GW</span>
-        <span>Built in TS</span>
-        <span>Aiden Zegil 2026</span>
+        <span class="key-label">Boost (cooldown)</span>
       </div>
     </div>
 
-    <footer class="colophon">
-      <div>© 2026 Aiden Zegil · Set in Antonio &amp; Cormorant Garamond</div>
-      <div class="end">
-        Source <a href="https://github.com/aidenzegil/car-personal-website">github.com/aidenzegil/car-personal-website</a>
+    <div class="hud br">
+      <dl class="readout">
+        <dt>Speed</dt>
+        <dd><span class="num" id="hud-speed">0</span> u/s</dd>
+        <dt>X / Z</dt>
+        <dd><span id="hud-x">0</span>, <span id="hud-z">0</span></dd>
+      </dl>
+      <div class="boost">
+        <div class="boost-track"><div id="hud-boost-fill"></div></div>
+        <div id="hud-boost-label" data-state="ready">BOOST READY</div>
       </div>
-    </footer>
+    </div>
 
-    <script>
-      // Live UTC clock in the masthead — small but the kind of detail that
-      // sells the "live broadcast" feel of the page.
-      (function () {
-        const cell = document.getElementById('clock-cell');
-        if (!cell) return;
-        const fmt = (n) => String(n).padStart(2, '0');
-        function tick() {
-          const d = new Date();
-          cell.textContent = `${fmt(d.getUTCHours())}:${fmt(d.getUTCMinutes())}:${fmt(d.getUTCSeconds())} UTC`;
-        }
-        tick(); setInterval(tick, 1000);
-      })();
-    </script>
+    <!-- First-load instruction. Auto-fades. -->
+    <div class="splash">
+      <div class="splash-card">
+        <strong>WASD to fly</strong>
+        Space to boost
+      </div>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

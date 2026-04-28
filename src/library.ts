@@ -11,7 +11,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
   attachHover, tickHover,
   addUnderglow,
-  makeThrusterTrail, tickThrusters,
+  makeAfterburner, tickAfterburners,
   polishCarMaterials,
 } from './shared/scene';
 
@@ -44,10 +44,11 @@ const ASSETS: AssetEntry[] = [
       group.add(car);
       addUnderglow(group);
 
-      const trail = makeThrusterTrail();
-      trail.position.set(0, 0.05, -0.85);
-      trail.rotation.x = Math.PI / 2;
-      group.add(trail);
+      // Afterburner cone trailing out the back. Using +Z = backward, since
+      // the docLorean's local front is -Z from this FBX import.
+      const flame = makeAfterburner({ radius: 0.18, length: 1.4 });
+      flame.position.set(0, 0.05, 0.85);
+      group.add(flame);
 
       attachHover(group, { liftHeight: 0.9, bobAmplitude: 0.07, spinSpeed: 0.25 });
       return group;
@@ -196,7 +197,7 @@ function tick() {
   const t = clock.getElapsedTime();
   if (activeAsset) {
     tickHover(activeAsset, dt, t);
-    tickThrusters(activeAsset, dt, t);
+    tickAfterburners(activeAsset, dt, t);
   }
   controls.update();
   renderer.render(scene, camera);
