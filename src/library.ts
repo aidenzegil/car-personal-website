@@ -10,9 +10,8 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
   attachHover, tickHover,
-  addUnderglow,
-  makeAfterburner, tickAfterburners,
   polishCarMaterials,
+  addDocLoreanFeatureLights,
 } from './shared/scene';
 
 interface AssetEntry {
@@ -32,25 +31,22 @@ const ASSETS: AssetEntry[] = [
     name: 'docLorean (Flying)',
     source: '/models/docLorean.fbx',
     dot: '#a78bfa',
-    notes: "Designersoup Low Poly Car Pack — DeLorean homage. Flight effects added: hover, spin, neon underglow, particle thruster trail.",
+    notes: "Designersoup Low Poly Car Pack — DeLorean homage. Headlights and taillights are real point lights cast from the car body.",
     async build(loader) {
       const car = await loader.loadAsync('/models/docLorean.fbx');
       // FBX from this pack ships at ~100x scale; bring it down to match the pad.
       car.scale.setScalar(0.01);
-      polishCarMaterials(car);
+      await polishCarMaterials(car, { palettePath: '/models/docLorean.fbm/387359c5580f06c08c266126b3b46db47e48ba44.png' });
 
       const group = new THREE.Group();
       group.name = 'docLorean-flying';
       group.add(car);
-      addUnderglow(group);
 
-      // Afterburner cone trailing out the back. Using +Z = backward, since
-      // the docLorean's local front is -Z from this FBX import.
-      const flame = makeAfterburner({ radius: 0.18, length: 1.4 });
-      flame.position.set(0, 0.05, 0.85);
-      group.add(flame);
+      addDocLoreanFeatureLights(group, car);
 
-      attachHover(group, { liftHeight: 0.9, bobAmplitude: 0.07, spinSpeed: 0.25 });
+      // Hover low to the platform so the cyan turbine pools land cleanly
+      // on the surface instead of dispersing into mid-air.
+      attachHover(group, { liftHeight: 0.4, bobAmplitude: 0.05, spinSpeed: 0 });
       return group;
     },
   },
@@ -68,7 +64,7 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPrefere
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 1.25;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x060912);
@@ -77,13 +73,22 @@ scene.fog = new THREE.Fog(0x060912, 8, 22);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
 camera.position.set(3.2, 2.0, 4.4);
 
-// Lighting: cool key + warm fill + ambient. Reads "showroom at night."
-const key = new THREE.DirectionalLight(0xc0e4ff, 1.6);
+// Toon lighting: a strong key from camera-right + a cool fill from the
+// opposite side so the cel-shaded body shows two distinct bands instead of
+// collapsing into one. Hemi gives the shadow side just enough lift to read
+// without flattening the bands.
+const key = new THREE.DirectionalLight(0xffffff, 1.7);
 key.position.set(5, 7, 4);
-const fill = new THREE.DirectionalLight(0xff7eb6, 0.8);
-fill.position.set(-4, 2, -3);
-const ambient = new THREE.AmbientLight(0x4a5878, 0.45);
-scene.add(key, fill, ambient);
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0x6dd5ff, 0.55);
+fill.position.set(-6, 3, -3);
+scene.add(fill);
+
+// Low hemi so the bands don't get washed out — toon banding only reads when
+// the directional contribution dominates the additive ambient.
+const hemi = new THREE.HemisphereLight(0xb8c8ff, 0x1a1f3a, 0.18);
+scene.add(hemi);
 
 // Display platform + grid floor — gives the floating car a frame of reference.
 const platform = new THREE.Mesh(
@@ -115,6 +120,17 @@ let activeIndex = -1;
 function clearActive() {
   if (!activeAsset) return;
   scene.remove(activeAsset);
+  // The asset's underglow disc lives in scene-space, not as a child of the
+  // group, so dispose / detach it explicitly when swapping assets.
+  const disc = (activeAsset.userData as any).underglowDisc as THREE.Mesh | undefined;
+  if (disc) {
+    scene.remove(disc);
+    disc.geometry.dispose();
+    (disc.material as THREE.Material | THREE.Material[] | undefined);
+    const m = disc.material as THREE.MeshBasicMaterial | undefined;
+    m?.map?.dispose?.();
+    m?.dispose?.();
+  }
   activeAsset.traverse((node) => {
     const mesh = node as THREE.Mesh;
     if ((mesh as any).isMesh) {
@@ -153,6 +169,12 @@ async function showAsset(idx: number) {
     return;
   }
   scene.add(obj);
+  // Pin the underglow disc just above the platform (platform.y ≈ 0).
+  const disc = (obj.userData as any).underglowDisc as THREE.Mesh | undefined;
+  if (disc) {
+    disc.position.set(0, 0.02, 0);
+    scene.add(disc);
+  }
   activeAsset = obj;
 }
 
@@ -197,7 +219,6 @@ function tick() {
   const t = clock.getElapsedTime();
   if (activeAsset) {
     tickHover(activeAsset, dt, t);
-    tickAfterburners(activeAsset, dt, t);
   }
   controls.update();
   renderer.render(scene, camera);
