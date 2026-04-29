@@ -12,7 +12,41 @@ import {
   attachHover, tickHover,
   polishCarMaterials,
   addDocLoreanFeatureLights,
+  findCarWheels,
+  wrapWheelPivots,
+  makeCarWheelState,
+  tickCarWheels,
+  groundOffsetY,
+  CarWheelState,
+  WheelStrategy,
 } from './shared/scene';
+
+// Per-car wheel rotation strategies. Each Designersoup model authored its
+// wheels differently — there's no clean generic detection that works for
+// all of them, so we hand-tune each car. Adding a new wheeled car =
+// adding an entry here + the asset entry below.
+const WHEEL_STRATEGIES: Record<string, WheelStrategy> = {
+  Beatall: {
+    rollAxis:  new THREE.Vector3(0, 0, 1),
+    steerAxis: new THREE.Vector3(0, 1, 0),
+  },
+  Landyroamer: {
+    // Wheels modelled lying flat with axle along pivot Y, so rolling is a
+    // turntable spin. Steer around Z (sideways) per user feedback.
+    rollAxis:  new THREE.Vector3(0, -1, 0),
+    steerAxis: new THREE.Vector3(0, 0, 1),
+  },
+  Toyoyo: {
+    rollAxis:  new THREE.Vector3(1, 0, 0),
+    // Steer around Z (sideways) instead of Y per user feedback — Y was
+    // producing a camber-tilt visual because of how the mesh is oriented.
+    steerAxis: new THREE.Vector3(0, 0, 1),
+  },
+  Tristar: {
+    rollAxis:  new THREE.Vector3(0, 1, 0),
+    steerAxis: new THREE.Vector3(0, 0, 1),
+  },
+};
 
 interface AssetEntry {
   category: 'vehicle';
@@ -25,18 +59,65 @@ interface AssetEntry {
   notes?: string;
 }
 
+// All Designersoup low-poly cars share a single palette texture inside their
+// .fbm sidecar, so the polish helper only ever needs one path per car.
+const SHARED_PALETTE = '387359c5580f06c08c266126b3b46db47e48ba44.png';
+const palettePathFor = (fbm: string) => `/models/${fbm}/${SHARED_PALETTE}`;
+
+/** Build a ground-car: sit it flat on the platform, roll its wheels slowly
+ *  for showroom flair, no hover. Wheel roll state lives on userData so the
+ *  shared tick loop can advance it. */
+async function buildWheeledCar(
+  loader: FBXLoader,
+  opts: { source: string; fbm: string; groupName: string; strategyKey: string; idleRollOmega?: number },
+): Promise<THREE.Object3D> {
+  const car = await loader.loadAsync(opts.source);
+  // FBX from this pack ships at ~100x scale; same factor used for the
+  // docLorean keeps every car at consistent showroom scale.
+  car.scale.setScalar(0.01);
+  // FBX-original frame has the car nose along +X. Rotate so it faces -Z (the
+  // viewer-friendly "front of the platform" direction for the orbit camera).
+  car.rotation.y = -Math.PI / 2;
+  await polishCarMaterials(car, { palettePath: palettePathFor(opts.fbm) });
+
+  const group = new THREE.Group();
+  group.name = opts.groupName;
+  group.add(car);
+
+  // Wrap each wheel in a pivot group at its world-space center. The FBX
+  // wheels are children of the car root with their own origins still at the
+  // car center, so rotating them naively would orbit the wheel around the
+  // car instead of spinning it around its axle. The pivot fixes the rotation
+  // center; the strategy decides which axes the pivot rotates around.
+  const detected = findCarWheels(car);
+  const strategy = WHEEL_STRATEGIES[opts.strategyKey];
+  const wheels = wrapWheelPivots(detected, strategy);
+  const wheelState = makeCarWheelState(wheels);
+
+  // Sit the car flat on the platform. Compute after wheel pivots are in
+  // place — the bbox is unchanged but updateMatrixWorld is now consistent.
+  car.position.y += groundOffsetY(car);
+
+  (group.userData as any).carWheels = wheelState;
+  // Slow idle wheel-roll — purely visual life on an otherwise static
+  // showcase. Sign convention: each wheel's stored `rollAxis` is already
+  // signed so that positive omega rolls top-forward, regardless of how the
+  // FBX wheel was oriented.
+  (group.userData as any).idleRollOmega = (opts.idleRollOmega ?? 1.6);
+  return group;
+}
+
 const ASSETS: AssetEntry[] = [
   {
     category: 'vehicle',
     name: 'docLorean (Flying)',
     source: '/models/docLorean.fbx',
     dot: '#a78bfa',
-    notes: "Designersoup Low Poly Car Pack — DeLorean homage. Headlights and taillights are real point lights cast from the car body.",
+    notes: "Designersoup Low Poly Car Pack — DeLorean homage. Hover-converted in this build: cyan point lights pin under each turbine wheel-pod and the rear thruster strip.",
     async build(loader) {
       const car = await loader.loadAsync('/models/docLorean.fbx');
-      // FBX from this pack ships at ~100x scale; bring it down to match the pad.
       car.scale.setScalar(0.01);
-      await polishCarMaterials(car, { palettePath: '/models/docLorean.fbm/387359c5580f06c08c266126b3b46db47e48ba44.png' });
+      await polishCarMaterials(car, { palettePath: palettePathFor('docLorean.fbm') });
 
       const group = new THREE.Group();
       group.name = 'docLorean-flying';
@@ -48,6 +129,66 @@ const ASSETS: AssetEntry[] = [
       // on the surface instead of dispersing into mid-air.
       attachHover(group, { liftHeight: 0.4, bobAmplitude: 0.05, spinSpeed: 0 });
       return group;
+    },
+  },
+  {
+    category: 'vehicle',
+    name: 'Beatall',
+    source: '/models/Beatall.fbx',
+    dot: '#ffb547',
+    notes: "Designersoup Low Poly Car Pack — VW Beetle homage. Wheeled ground car: sits flat on the platform with a slow idle roll on all four wheels.",
+    async build(loader) {
+      return buildWheeledCar(loader, {
+        source: '/models/Beatall.fbx',
+        fbm: 'Beatall.fbm',
+        groupName: 'beatall',
+        strategyKey: 'Beatall',
+      });
+    },
+  },
+  {
+    category: 'vehicle',
+    name: 'Landyroamer',
+    source: '/models/Landyroamer.fbx',
+    dot: '#7dd3fc',
+    notes: "Designersoup Low Poly Car Pack — Land Rover Defender homage. Tall stance, bull-bar grille, idle wheel roll.",
+    async build(loader) {
+      return buildWheeledCar(loader, {
+        source: '/models/Landyroamer.fbx',
+        fbm: 'Landyroamer.fbm',
+        groupName: 'landyroamer',
+        strategyKey: 'Landyroamer',
+      });
+    },
+  },
+  {
+    category: 'vehicle',
+    name: 'Toyoyo Highlight',
+    source: '/models/Toyoyo Highlight.fbx',
+    dot: '#86efac',
+    notes: "Designersoup Low Poly Car Pack — Toyota Hilux homage (FBX names its body `hilux body`). Pickup truck silhouette, idle wheel roll.",
+    async build(loader) {
+      return buildWheeledCar(loader, {
+        source: '/models/Toyoyo Highlight.fbx',
+        fbm: 'Toyoyo Highlight.fbm',
+        groupName: 'toyoyo-highlight',
+        strategyKey: 'Toyoyo',
+      });
+    },
+  },
+  {
+    category: 'vehicle',
+    name: 'Tristar Racer',
+    source: '/models/Tristar Racer.fbx',
+    dot: '#f87171',
+    notes: "Designersoup Low Poly Car Pack — Mercedes AMG GT homage (FBX names its body `amg Gt body`). Low slung sports coupe, idle wheel roll.",
+    async build(loader) {
+      return buildWheeledCar(loader, {
+        source: '/models/Tristar Racer.fbx',
+        fbm: 'Tristar Racer.fbm',
+        groupName: 'tristar-racer',
+        strategyKey: 'Tristar',
+      });
     },
   },
 ];
@@ -212,18 +353,83 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
 
-// Animation loop — handles per-frame hover + thruster particle motion.
+// ---- Test-rig controls ----
+//
+// The library is a static showcase, but for visual verification + automated
+// tests we let WASD drive each car *in place*: wheels roll forward/back, front
+// wheels steer left/right. No translation — orbit controls stay free for the
+// user to look around. Tests poke window.__lib to read live wheel state and
+// confirm rotations match input direction.
+const keys = new Set<string>();
+window.addEventListener('keydown', (e) => {
+  const tgt = e.target as HTMLElement | null;
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  keys.add(e.key.toLowerCase());
+  if (e.code === 'KeyW') keys.add('w');
+  if (e.code === 'KeyA') keys.add('a');
+  if (e.code === 'KeyS') keys.add('s');
+  if (e.code === 'KeyD') keys.add('d');
+});
+window.addEventListener('keyup', (e) => {
+  keys.delete(e.key.toLowerCase());
+  if (e.code === 'KeyW') keys.delete('w');
+  if (e.code === 'KeyA') keys.delete('a');
+  if (e.code === 'KeyS') keys.delete('s');
+  if (e.code === 'KeyD') keys.delete('d');
+});
+window.addEventListener('blur', () => keys.clear());
+
+const TEST_RIG_ROLL_OMEGA  = 4.5;  // rad/s — fairly fast so wheels visibly spin
+const TEST_RIG_STEER_ANGLE = 0.45; // rad (~26°) — matches homepage steer max
+
+// Animation loop — handles per-frame hover + idle wheel roll + test-rig WASD.
 const clock = new THREE.Clock();
 function tick() {
   const dt = clock.getDelta();
   const t = clock.getElapsedTime();
   if (activeAsset) {
     tickHover(activeAsset, dt, t);
+    const wheelState = (activeAsset.userData as any).carWheels as CarWheelState | undefined;
+    const idleOmega = (activeAsset.userData as any).idleRollOmega as number | undefined;
+    if (wheelState) {
+      // WASD overrides idle rolling so tests have a deterministic input. W = forward
+      // roll (matching homepage sign convention), S = reverse, A/D = steer the
+      // front wheels. With no input we fall back to the idle showcase rotation.
+      const fwd = (keys.has('w') || keys.has('arrowup')) ? 1 : 0;
+      const rev = (keys.has('s') || keys.has('arrowdown')) ? 1 : 0;
+      const left  = (keys.has('a') || keys.has('arrowleft'))  ? 1 : 0;
+      const right = (keys.has('d') || keys.has('arrowright')) ? 1 : 0;
+      const inputDir = fwd - rev;
+      const steerDir = left - right;  // A turns left, D turns right
+      const rollOmega = inputDir !== 0
+        ? inputDir * TEST_RIG_ROLL_OMEGA  // signed rollAxis handles direction
+        : (idleOmega ?? 0);
+      const steerAngle = steerDir * TEST_RIG_STEER_ANGLE;
+      tickCarWheels(wheelState, dt, { rollOmega, steerAngle });
+    }
   }
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
+
+// ---- Test hooks ----
+//
+// Exposed on `window.__lib` so Playwright (or anyone in DevTools) can read
+// wheel/quaternion state without going through the WebGL pixel buffer. The
+// signs of these quaternions are what verify "did A make the wheel turn left",
+// independent of camera or rendering.
+(window as any).__lib = {
+  THREE,
+  get assets() { return ASSETS.map((a) => ({ name: a.name, source: a.source })); },
+  get activeIndex() { return activeIndex; },
+  get activeAsset() { return activeAsset; },
+  get wheelState() { return activeAsset ? (activeAsset.userData as any).carWheels as CarWheelState | undefined : undefined; },
+  showAsset,
+  pressKey(key: string) { keys.add(key.toLowerCase()); },
+  releaseKey(key: string) { keys.delete(key.toLowerCase()); },
+  clearKeys() { keys.clear(); },
+};
 
 function resize() {
   const wrap = canvas.parentElement!;

@@ -17,8 +17,98 @@ import {
   polishCarMaterials,
   addDocLoreanFeatureLights,
   attachWheelHardware,
+  findCarWheels,
+  wrapWheelPivots,
+  makeCarWheelState,
+  tickCarWheels,
+  groundOffsetY,
+  estimateWheelRadius,
+  CarWheelState,
+  WheelStrategy,
 } from './shared/scene';
 import { createFlightControls } from './shared/flight-controls';
+
+// ---- Car catalog ----
+//
+// `fly` = docLorean-style: hovers, no rolling wheels, turbine pod tilt + body
+// fishtail. `drive` = ground car: sits flat on the platform, wheels roll with
+// forward speed, front wheels steer.
+type CarMode = 'fly' | 'drive';
+interface CarOption {
+  id: string;          // hash key
+  label: string;       // HUD-friendly name
+  source: string;
+  fbm: string;
+  mode: CarMode;
+  /** Per-car wheel rotation strategy. Each Designersoup model authored its
+   *  wheels differently — there's no clean generic detection that works for
+   *  all of them, so we hand-tune each. Only used in `drive` mode. */
+  wheelStrategy?: WheelStrategy;
+}
+const SHARED_PALETTE = '387359c5580f06c08c266126b3b46db47e48ba44.png';
+const palettePathFor = (fbm: string) => `/models/${fbm}/${SHARED_PALETTE}`;
+const CARS: CarOption[] = [
+  { id: 'docLorean', label: 'docLorean', source: '/models/docLorean.fbx', fbm: 'docLorean.fbm', mode: 'fly' },
+  {
+    id: 'Beatall', label: 'Beatall',
+    source: '/models/Beatall.fbx', fbm: 'Beatall.fbm', mode: 'drive',
+    wheelStrategy: { rollAxis: new THREE.Vector3(0, 0, 1), steerAxis: new THREE.Vector3(0, 1, 0) },
+  },
+  {
+    id: 'Landyroamer', label: 'Landyroamer',
+    source: '/models/Landyroamer.fbx', fbm: 'Landyroamer.fbm', mode: 'drive',
+    // Wheels modelled lying flat with axle along pivot Y, so rolling is a
+    // turntable spin. Steer around Z (sideways) per user feedback.
+    wheelStrategy: { rollAxis: new THREE.Vector3(0, -1, 0), steerAxis: new THREE.Vector3(0, 0, 1) },
+  },
+  {
+    id: 'Toyoyo', label: 'Toyoyo Highlight',
+    source: '/models/Toyoyo Highlight.fbx', fbm: 'Toyoyo Highlight.fbm', mode: 'drive',
+    // Steer around Z (sideways) instead of Y per user feedback.
+    wheelStrategy: { rollAxis: new THREE.Vector3(1, 0, 0), steerAxis: new THREE.Vector3(0, 0, 1) },
+  },
+  {
+    id: 'Tristar', label: 'Tristar Racer',
+    source: '/models/Tristar Racer.fbx', fbm: 'Tristar Racer.fbm', mode: 'drive',
+    wheelStrategy: { rollAxis: new THREE.Vector3(0, 1, 0), steerAxis: new THREE.Vector3(0, 0, 1) },
+  },
+];
+
+// Hash-based picker: `#car=Beatall`. Default is docLorean — keeps the
+// original site behavior intact for anyone with the bare URL bookmarked.
+function pickCarFromHash(): CarOption {
+  const m = window.location.hash.match(/car=([^&]+)/i);
+  const id = m ? decodeURIComponent(m[1]!) : 'docLorean';
+  return CARS.find((c) => c.id.toLowerCase() === id.toLowerCase()) ?? CARS[0]!;
+}
+const ACTIVE_CAR = pickCarFromHash();
+
+// Render the car-picker UI + reload on selection. Hash changes drive a full
+// page reload — simpler than tearing down the WebGL scene live, and the FBX
+// loader cache means the second pick of the same car is instant anyway.
+function renderCarPicker() {
+  const host = document.getElementById('car-picker');
+  if (!host) return;
+  host.innerHTML = CARS.map((c) =>
+    `<a href="#car=${encodeURIComponent(c.id)}" data-id="${c.id}" class="${c.id === ACTIVE_CAR.id ? 'active' : ''}">${c.label}</a>`,
+  ).join('');
+}
+renderCarPicker();
+window.addEventListener('hashchange', () => {
+  if (pickCarFromHash().id !== ACTIVE_CAR.id) window.location.reload();
+});
+
+// Update the static HUD copy to reflect the chosen car's mode.
+{
+  const subj = document.getElementById('hud-subject');
+  const fx = document.getElementById('hud-fx');
+  if (subj) subj.textContent = ACTIVE_CAR.label;
+  if (fx) fx.textContent = ACTIVE_CAR.mode === 'fly'
+    ? 'neon · hover · afterburner'
+    : 'neon · drive · rolling wheels';
+  const splashVerb = document.getElementById('splash-verb');
+  if (splashVerb) splashVerb.textContent = ACTIVE_CAR.mode === 'fly' ? 'WASD to fly' : 'WASD to drive';
+}
 
 const canvas = document.getElementById('hero-canvas') as HTMLCanvasElement | null;
 if (!canvas) throw new Error('hero canvas missing');
@@ -221,9 +311,9 @@ const loader = new FBXLoader();
 let carLoaded = false;
 let flightControls: ReturnType<typeof createFlightControls> | null = null;
 
-// Wheel-pod tilt rig — captured after the FBX loads. We store each wheel's
-// rest quaternion so per-frame tilts compose against the original orientation
-// instead of accumulating drift.
+// Wheel-pod tilt rig — captured after the FBX loads (docLorean only). We
+// store each wheel's rest quaternion so per-frame tilts compose against the
+// original orientation instead of accumulating drift.
 interface WheelTilt { obj: THREE.Object3D; baseQuat: THREE.Quaternion }
 const wheelTilts: WheelTilt[] = [];
 const _tiltQuat = new THREE.Quaternion();
@@ -232,6 +322,13 @@ const WHEEL_PITCH_MAX = 0.4;  // radians (~23°): pods angle on accel/brake
 const WHEEL_ROLL_MAX  = 0.35; // radians (~20°): lean into turns
 const CAR_PITCH_MAX   = 0.11; // radians (~6°): subtle body squat/lift
 const CAR_ROLL_MAX    = 0.14; // radians (~8°): body leans into the turn
+
+// Wheeled-car rig (drive mode only). `wheelState` owns the four classified
+// wheels + accumulated roll angle; `wheelRadius` converts forward velocity to
+// angular velocity so the spin rate visually matches the ground speed.
+let wheelState: CarWheelState | null = null;
+let wheelRadius = 0.3;
+const DRIVE_STEER_MAX = 0.45; // radians (~26°): max front-wheel steer angle
 
 // Drift fishtail — purely visual yaw on carBody. Two phases:
 //   1. Press/hold: critically-damped spring drives body to a steady rear-out
@@ -260,27 +357,41 @@ let smoothPitch = 0;
 const TILT_TAU_IN  = 0.05; // s — engaging or growing magnitude
 const TILT_TAU_OUT = 0.35; // s — returning toward 0 after release
 
-void loader.loadAsync('/models/docLorean.fbx').then((root) => {
+void loader.loadAsync(ACTIVE_CAR.source).then(async (root) => {
+  // FBX-ORIGINAL frame for this whole pack: car nose along +X. Rotate so
+  // local -Z is forward — that's the direction flight-controls uses at yaw 0.
   root.scale.setScalar(0.012);
-  // The FBX ships with its long axis along +X, so a 90° turn brings the nose
-  // around to local -Z — which is the forward direction flight-controls uses
-  // at yaw 0.
   root.rotation.y = -Math.PI / 2;
-  void polishCarMaterials(root, { palettePath: '/models/docLorean.fbm/387359c5580f06c08c266126b3b46db47e48ba44.png' });
+  await polishCarMaterials(root, { palettePath: palettePathFor(ACTIVE_CAR.fbm) });
   carBody.add(root);
-  addDocLoreanFeatureLights(carRig, root);
 
-  // Pull wheel struts/connectors into each wheel so they tilt as one unit.
-  // Must run before we cache wheel rest quats (in case attach() mutates).
-  const wheelNames = ['lFWheel', 'rFWheel', 'lRWheel', 'rRWheel'];
-  attachWheelHardware(root, wheelNames);
-
-  for (const name of wheelNames) {
-    const w = root.getObjectByName(name);
-    if (w) wheelTilts.push({ obj: w, baseQuat: w.quaternion.clone() });
+  if (ACTIVE_CAR.mode === 'fly') {
+    // docLorean: cyan turbine pools + rear thruster glow, hovering rig, pod
+    // pitch/roll on accel/turn. The hovercraft conceit means strut-cluster
+    // tilting reads correctly here — re-parenting the struts into the wheel
+    // node lets each pod tilt as one unit.
+    const initialWheels = findCarWheels(root);
+    attachWheelHardware(root, initialWheels.map((w) => w.obj.name));
+    addDocLoreanFeatureLights(carRig, root);
+    for (const w of findCarWheels(root)) {
+      wheelTilts.push({ obj: w.obj, baseQuat: w.obj.quaternion.clone() });
+    }
+    attachHover(carRig, { liftHeight: 0.4, bobAmplitude: 0.05, spinSpeed: 0 });
+  } else {
+    // Wheeled ground car. Pivot-wrap each wheel so rotation happens at the
+    // visible wheel center, not the FBX root pivot — without this the FBX
+    // wheels orbit around the car instead of spinning. We deliberately skip
+    // `attachWheelHardware` here: on cars with mirrors / spoilers / wide
+    // wheel arches it grabs body geometry by bbox proximity, then drags it
+    // around with the wheel rotation, which is what produced the floating
+    // green panels. Plain mesh-only wheel rotation looks correct.
+    const detected = findCarWheels(root);
+    const wheels = wrapWheelPivots(detected, ACTIVE_CAR.wheelStrategy);
+    wheelState = makeCarWheelState(wheels);
+    wheelRadius = Math.max(0.05, estimateWheelRadius(wheels));
+    root.position.y += groundOffsetY(root);
   }
 
-  attachHover(carRig, { liftHeight: 0.4, bobAmplitude: 0.05, spinSpeed: 0 });
   flightControls = createFlightControls(carRig, {
     maxSpeed: 22,
     maxBoostSpeed: 38,
@@ -289,9 +400,23 @@ void loader.loadAsync('/models/docLorean.fbx').then((root) => {
     steerOutLag: 0.001,
   });
   carLoaded = true;
+  // Test hooks: refreshed once the car is fully loaded so Playwright can
+  // synchronously read wheel state, position, etc.
+  (window as any).__home = {
+    car: ACTIVE_CAR,
+    carRig,
+    carBody,
+    flightControls,
+    wheelState,
+    wheelRadius,
+    loaded: true,
+  };
 }).catch((err) => {
-  console.error('homepage: failed to load docLorean', err);
+  console.error('homepage: failed to load car', ACTIVE_CAR.id, err);
 });
+
+// Pre-load placeholder so tests can poll `window.__home.loaded`.
+(window as any).__home = { car: ACTIVE_CAR, loaded: false };
 
 // ---- Crossy Road camera ----
 //
@@ -404,10 +529,6 @@ function tick() {
 
   if (carLoaded && flightControls) {
     flightControls.update(dt);
-    // Tilt the four turbine pods to match input. Wheels live in FBX-original
-    // local space (pre-yaw), where the car's long axis is +X — so pitch about
-    // local Z reads as nose-up/nose-down, and roll about local X leans the
-    // pods left/right when steering.
     const rawPitch = flightControls.pitchFraction();
     const rawRoll = flightControls.rollFraction();
     const pitchTau = Math.abs(rawPitch) > Math.abs(smoothPitch) ? TILT_TAU_IN : TILT_TAU_OUT;
@@ -416,27 +537,54 @@ function tick() {
     smoothRoll  += (rawRoll  - smoothRoll)  * (1 - Math.exp(-dt / rollTau));
     const pitch = smoothPitch;
     const roll = smoothRoll;
-    _tiltEuler.set(roll * WHEEL_ROLL_MAX, 0, -pitch * WHEEL_PITCH_MAX);
-    _tiltQuat.setFromEuler(_tiltEuler);
-    for (const { obj, baseQuat } of wheelTilts) {
-      obj.quaternion.copy(baseQuat).multiply(_tiltQuat);
-    }
-    // Subtle full-car lean: nose rises a touch on acceleration, body banks
-    // into the turn. Smaller magnitude than the wheel tilt so the wheels
-    // still read as the active suspension.
-    carBody.rotation.x = -pitch * CAR_PITCH_MAX;
-    carBody.rotation.z = -roll * CAR_ROLL_MAX;
 
-    // Fishtail. On release we inject a velocity kick AWAY from the held
-    // offset and switch to underdamped spring chasing 0 — body sweeps
-    // immediately, with no linger, then overshoots into a smaller
-    // counter-flick before settling.
+    if (ACTIVE_CAR.mode === 'fly') {
+      // Tilt the four turbine pods to match input. Wheels live in
+      // FBX-original local space (pre-yaw), where the car's long axis is +X
+      // — so pitch about local Z reads as nose-up/nose-down, and roll about
+      // local X leans the pods left/right when steering.
+      _tiltEuler.set(roll * WHEEL_ROLL_MAX, 0, -pitch * WHEEL_PITCH_MAX);
+      _tiltQuat.setFromEuler(_tiltEuler);
+      for (const { obj, baseQuat } of wheelTilts) {
+        obj.quaternion.copy(baseQuat).multiply(_tiltQuat);
+      }
+    } else if (wheelState) {
+      // Roll all wheels at angular velocity v/r so the rim's linear speed
+      // matches the car's. Each wheel's `rollAxis` is signed during pivot
+      // wrap (see `detectRollAxis`) so a positive omega rolls top-forward
+      // regardless of how the FBX exporter oriented the wheel mesh — the
+      // call site can stay sign-agnostic. Front wheels also pick up a
+      // steer yaw; flightControls.rollFraction returns +1 for D (right
+      // turn), but rotating the wheel around +Y by a positive angle yaws
+      // it left, so we negate.
+      const v = flightControls.forwardSpeed();
+      const rollOmega = v / wheelRadius;
+      const steerAngle = -roll * DRIVE_STEER_MAX;
+      tickCarWheels(wheelState, dt, { rollOmega, steerAngle });
+    }
+    // Pitch/roll body lean is fly-mode only — real cars don't pitch their
+    // whole chassis on a flat road. Fishtail (body Y-yaw) applies to both
+    // modes: reads as hover drift on the docLorean and as a smaller
+    // weight-transfer slide on ground cars.
+    if (ACTIVE_CAR.mode === 'fly') {
+      carBody.rotation.x = -pitch * CAR_PITCH_MAX;
+      carBody.rotation.z = -roll * CAR_ROLL_MAX;
+    } else {
+      carBody.rotation.x = 0;
+      carBody.rotation.z = 0;
+    }
+
+    // Fishtail scaling: docLorean keeps its hover-rooted constant amount so
+    // the feel doesn't change under the user. Ground cars scale by speed —
+    // no fishtail when parked, 2× the docLorean's amount at top speed —
+    // because IRL weight-transfer slide is a function of momentum.
+    const fishtailScale = ACTIVE_CAR.mode === 'fly' ? 1 : flightControls.speedFraction() * 2;
     const steerNow = flightControls.steerInput();
     if (steerNow === 0 && prevSteerInput !== 0) {
-      fishtailYawVel += -Math.sign(prevSteerInput) * FISHTAIL_RELEASE_KICK;
+      fishtailYawVel += -Math.sign(prevSteerInput) * FISHTAIL_RELEASE_KICK * fishtailScale;
     }
     prevSteerInput = steerNow;
-    const fishTarget = steerNow * FISHTAIL_HOLD_OFFSET;
+    const fishTarget = steerNow * FISHTAIL_HOLD_OFFSET * fishtailScale;
     const fishDamp = steerNow !== 0 ? FISHTAIL_DAMP_PRESS : FISHTAIL_DAMP_RELEASE;
     const fishAccel =
       (fishTarget - fishtailYaw) * FISHTAIL_OMEGA * FISHTAIL_OMEGA
@@ -446,7 +594,7 @@ function tick() {
     carBody.rotation.y = fishtailYaw;
 
     updateBlocks(dt);
-    tickHover(carRig, dt, t);
+    if (ACTIVE_CAR.mode === 'fly') tickHover(carRig, dt, t);
     updateCamera(dt);
     updateHud();
   } else {

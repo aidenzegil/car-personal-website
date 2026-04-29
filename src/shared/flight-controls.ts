@@ -45,6 +45,10 @@ export interface FlightControls {
    *  the exact frame the user presses or releases A/D — `rollFraction` is
    *  smoothed and won't show those edges cleanly. */
   steerInput(): number;
+  /** Signed scalar forward speed in world units / second. Negative during
+   *  reverse. Unlike `velocity.length()`, preserves the direction sign needed
+   *  for things like wheel-roll direction. */
+  forwardSpeed(): number;
   update(dt: number): void;
   dispose(): void;
 }
@@ -214,6 +218,7 @@ export function createFlightControls(target: THREE.Object3D, opts: FlightControl
       return Math.max(-1, Math.min(1, -yawRate / cfg.steerRate));
     },
     steerInput() { return lastSteerInput; },
+    forwardSpeed() { return forwardSpeed; },
     update,
     dispose() {
       window.removeEventListener('keydown', onKeyDown);

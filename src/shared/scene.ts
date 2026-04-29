@@ -310,6 +310,226 @@ export function attachWheelHardware(root: THREE.Object3D, wheelNames: string[]):
   }
 }
 
+// ---- Generic wheeled-car helpers ----
+//
+// The Designersoup pack tags wheels with names that always start with one of
+// `lf`, `rf`, `lr`, `rr` (case varies — `lFWheel`, `lfWheel`, even
+// `lrWheel.001` for duplicate exports). That naming is reliable enough to
+// auto-detect wheels and classify each as front/rear + left/right without
+// per-car configuration.
+
+export interface CarWheel {
+  obj: THREE.Object3D;
+  axle: 'front' | 'rear';
+  side: 'left' | 'right';
+  baseQuat: THREE.Quaternion;
+  /** Signed axle axis in the wheel's parent (pivot) frame, oriented so a
+   *  positive `rollOmega` rolls the top of the wheel toward the car's
+   *  forward direction. Per-wheel because some FBX exports orient different
+   *  wheels with different local rotations. */
+  rollAxis: THREE.Vector3;
+  /** Steer axis — vertical in pivot's frame (pivot inherits the FBX root's
+   *  Y axis, which stays aligned with world Y in this scene). */
+  steerAxis: THREE.Vector3;
+}
+
+/** Find every wheel in `root`, classify by world-space position, and snapshot
+ *  its rest quaternion.
+ *
+ *  Classification:
+ *  - Forward in world space is -Z. main.ts and library.ts both apply a
+ *    `root.rotation.y = -π/2` and flight-controls translates the rig in
+ *    world -Z when forwardSpeed > 0. So a wheel with smaller world-Z value
+ *    sits closer to the car's nose — it's a front wheel.
+ *  - Sideways is world X; we just split the cluster down the middle.
+ *  - We use spatial position rather than FBX names because Beatall ships
+ *    with name collisions (two `lrWheel` children, no `rrWheel`).
+ *
+ *  We sort the candidate wheels and pick the two with the smallest Z as
+ *  front, the two with the largest as rear. That avoids any median-of-four
+ *  edge case (Z values can repeat across left/right, and a `>=` comparison
+ *  on the median would flip a 2/2 split into 4/0). */
+export function findCarWheels(root: THREE.Object3D): CarWheel[] {
+  root.updateMatrixWorld(true);
+  type Candidate = { obj: THREE.Object3D; cx: number; cz: number };
+  const candidates: Candidate[] = [];
+  root.traverse((node) => {
+    if (!/wheel/i.test(node.name)) return;
+    const bb = new THREE.Box3().setFromObject(node);
+    if (bb.isEmpty()) return;
+    const c = new THREE.Vector3(); bb.getCenter(c);
+    candidates.push({ obj: node, cx: c.x, cz: c.z });
+  });
+  if (candidates.length === 0) return [];
+
+  // Front = the half-cluster closer to world -Z.
+  const sortedByZ = [...candidates].sort((a, b) => a.cz - b.cz);
+  const halfCount = Math.floor(sortedByZ.length / 2);
+  const frontSet = new Set(sortedByZ.slice(0, halfCount).map((c) => c.obj));
+
+  // Sideways split: median X. Left = world -X side after the FBX root's
+  // -π/2 rotation. Beatall happens to have lf at world -X and rf at +X;
+  // other cars in the pack follow the same world-frame convention since
+  // they all share the same root rotation.
+  const sortedByX = [...candidates].map((c) => c.cx).sort((a, b) => a - b);
+  const midX = sortedByX[Math.floor(sortedByX.length / 2)] ?? 0;
+
+  return candidates.map(({ obj, cx }) => ({
+    obj,
+    axle: frontSet.has(obj) ? 'front' : 'rear',
+    side: cx < midX ? 'left' : 'right',
+    baseQuat: obj.quaternion.clone(),
+    // Roll/steer axes are filled in by `wrapWheelPivots`. The defaults here
+    // are safe stand-ins but only matter if a caller forgets to wrap.
+    rollAxis: new THREE.Vector3(0, 0, -1),
+    steerAxis: new THREE.Vector3(0, 1, 0),
+  }));
+}
+
+/** Per-car wheel rotation strategy. Each Designersoup model authored its
+ *  wheels differently — some have axle along Z, some along X, some lying
+ *  flat with axle along Y. There's no clean generic rule that works for
+ *  all of them, so callers pick a strategy by car id. The fallback is
+ *  Beatall's working setup. */
+export interface WheelStrategy {
+  /** Axis the pivot rotates around when rolling (W/S). */
+  rollAxis: THREE.Vector3;
+  /** Axis the pivot rotates around when steering (A/D). Only applied to
+   *  wheels classified as `front`. */
+  steerAxis: THREE.Vector3;
+}
+
+export const DEFAULT_WHEEL_STRATEGY: WheelStrategy = {
+  rollAxis: new THREE.Vector3(0, 0, 1),
+  steerAxis: new THREE.Vector3(0, 1, 0),
+};
+
+/** Wrap each wheel in a parent group whose origin sits at the wheel's
+ *  world-space center, then re-parent the wheel into that group with
+ *  `Object3D.attach` so its world transform is preserved. Rotating the pivot
+ *  spins the wheel around its own axle instead of orbiting it around the
+ *  FBX root pivot (which on these models lives at the car's center).
+ *
+ *  The strategy parameter decides which axes the pivot rotates around for
+ *  rolling and steering — that's how each car gets its hand-tuned wheel
+ *  motion without sharing logic that's brittle across the inconsistent
+ *  FBX exports.
+ *
+ *  Idempotent: if a wheel is already wrapped (parent name ends in `_pivot`)
+ *  it's left alone and the existing pivot is reused. */
+export function wrapWheelPivots(
+  wheels: CarWheel[],
+  strategy: WheelStrategy = DEFAULT_WHEEL_STRATEGY,
+): CarWheel[] {
+  return wheels.map((w) => {
+    const wheel = w.obj;
+    const parent = wheel.parent;
+    if (!parent) return w;
+    if (parent.name.endsWith('_pivot')) {
+      return {
+        obj: parent,
+        axle: w.axle,
+        side: w.side,
+        baseQuat: parent.quaternion.clone(),
+        rollAxis: strategy.rollAxis.clone(),
+        steerAxis: strategy.steerAxis.clone(),
+      };
+    }
+    parent.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(wheel);
+    if (bb.isEmpty()) return w;
+    const worldCenter = new THREE.Vector3();
+    bb.getCenter(worldCenter);
+    const localCenter = parent.worldToLocal(worldCenter.clone());
+
+    const pivot = new THREE.Group();
+    pivot.name = wheel.name + '_pivot';
+    pivot.position.copy(localCenter);
+    parent.add(pivot);
+    pivot.attach(wheel);
+
+    return {
+      obj: pivot,
+      axle: w.axle,
+      side: w.side,
+      baseQuat: pivot.quaternion.clone(),
+      rollAxis: strategy.rollAxis.clone(),
+      steerAxis: strategy.steerAxis.clone(),
+    };
+  });
+}
+
+export interface CarWheelState {
+  wheels: CarWheel[];
+  /** Accumulated roll angle (radians). Resets nothing; just keeps growing. */
+  rollAngle: number;
+  /** Current steer angle applied to front wheels (radians). Stored on state
+   *  so the value is observable for tests; the actual application is
+   *  per-wheel via the wheel's stored `steerAxis`. */
+  steerAngle: number;
+}
+
+export function makeCarWheelState(wheels: CarWheel[]): CarWheelState {
+  return { wheels, rollAngle: 0, steerAngle: 0 };
+}
+
+const _rollQuat = new THREE.Quaternion();
+const _steerQuat = new THREE.Quaternion();
+
+/** Per-frame wheel update.
+ *  - `rollOmega` rad/sec advances the roll angle. The signed `rollAxis` on
+ *    each wheel ensures positive omega rolls the top of the wheel toward
+ *    the car's forward direction — caller doesn't need to flip signs.
+ *  - `steerAngle` is applied only to wheels classified as `'front'`.
+ *
+ *  Composition order: `baseQuat * steerQuat * rollQuat`. Steer comes first
+ *  in the multiplication so it's applied second when transforming a vector
+ *  — the wheel rolls in its local frame, then the steer rotates the rolling
+ *  wheel around the vertical axis. */
+export function tickCarWheels(
+  state: CarWheelState,
+  dt: number,
+  opts: { rollOmega: number; steerAngle?: number },
+): void {
+  state.rollAngle += opts.rollOmega * dt;
+  state.steerAngle = opts.steerAngle ?? 0;
+  for (const w of state.wheels) {
+    _rollQuat.setFromAxisAngle(w.rollAxis, state.rollAngle);
+    if (w.axle === 'front' && state.steerAngle !== 0) {
+      _steerQuat.setFromAxisAngle(w.steerAxis, state.steerAngle);
+      w.obj.quaternion.copy(w.baseQuat).multiply(_steerQuat).multiply(_rollQuat);
+    } else {
+      w.obj.quaternion.copy(w.baseQuat).multiply(_rollQuat);
+    }
+  }
+}
+
+/** World-space Y offset that puts the car's lowest point at y=0 — i.e., the
+ *  amount to add to root.position.y so wheels rest on the platform.
+ *  `root` must be in the scene + have its final scale/rotation applied. */
+export function groundOffsetY(root: THREE.Object3D): number {
+  root.updateMatrixWorld(true);
+  const bb = new THREE.Box3().setFromObject(root);
+  return -bb.min.y;
+}
+
+/** Estimate wheel radius in world units — used to convert linear car speed
+ *  to wheel angular velocity. Takes the median of all wheels' max(X, Y)
+ *  bbox extents so a single oddly-shaped wheel can't skew the estimate. */
+export function estimateWheelRadius(wheels: CarWheel[]): number {
+  if (wheels.length === 0) return 0.3;
+  const radii: number[] = [];
+  for (const w of wheels) {
+    const bb = new THREE.Box3().setFromObject(w.obj);
+    if (bb.isEmpty()) continue;
+    const s = new THREE.Vector3(); bb.getSize(s);
+    radii.push(Math.max(s.x, s.y) * 0.5);
+  }
+  if (radii.length === 0) return 0.3;
+  radii.sort((a, b) => a - b);
+  return radii[Math.floor(radii.length / 2)]!;
+}
+
 // ---- Underglow ----
 
 export interface UnderglowOpts {

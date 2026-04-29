@@ -4,6 +4,10 @@ dist/
 .DS_Store
 *.log
 
+# Playwright
+playwright-report/
+test-results/
+
 # Editor / OS noise
 .idea/
 .vscode/*

@@ -89,6 +89,38 @@
         text-decoration: none;
       }
 
+      /* Car picker — one tiny row of buttons that swap the active car via
+         URL hash (so the page reloads with the new car selected). */
+      .car-picker {
+        margin-top: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: flex-end;
+        pointer-events: auto;
+      }
+      .car-picker a {
+        display: inline-block;
+        padding: 3px 8px;
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        border: 1px solid var(--paper-f);
+        color: var(--paper-m);
+        text-decoration: none;
+        transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+      }
+      .car-picker a:hover {
+        border-color: var(--cyan);
+        color: var(--cyan);
+        background: rgba(109, 213, 255, 0.06);
+        text-decoration: none;
+      }
+      .car-picker a.active {
+        border-color: var(--paper);
+        color: var(--paper);
+        background: rgba(239, 233, 216, 0.05);
+      }
+
       /* Bottom-left: control hints. Big enough to be the primary instruction. */
       .hud.bl {
         bottom: 26px; left: 26px;
@@ -226,8 +258,9 @@
     </div>
 
     <div class="hud tr">
-      <div>Subj. <strong>docLorean</strong></div>
-      <div>FX <em>neon · hover · afterburner</em></div>
+      <div>Subj. <strong id="hud-subject">docLorean</strong></div>
+      <div>FX <em id="hud-fx">neon · hover · afterburner</em></div>
+      <div id="car-picker" class="car-picker"></div>
       <a class="lib" href="/library.html">Asset library →</a>
     </div>
 
@@ -267,10 +300,11 @@
       </div>
     </div>
 
-    <!-- First-load instruction. Auto-fades. -->
+    <!-- First-load instruction. Auto-fades. Verb is patched in main.ts so the
+         splash matches the active car (drive vs fly). -->
     <div class="splash">
       <div class="splash-card">
-        <strong>WASD to fly</strong>
+        <strong id="splash-verb">WASD to fly</strong>
         Space to boost
       </div>
     </div>
