@@ -542,21 +542,17 @@ let wheelState: CarWheelState | null = null;
 let wheelRadius = 0.3;
 const DRIVE_STEER_MAX = 0.45; // radians (~26°): max front-wheel steer angle
 
-// Drift fishtail — purely visual yaw on carBody. Two phases:
-//   1. Press/hold: critically-damped spring drives body to a steady rear-out
-//      offset proportional to steerInput. No press flick.
-//   2. Release: instant velocity kick AWAY from the held offset, plus a
-//      switch to underdamped low-damp spring with target 0. The body sweeps
-//      through 0 into a smaller counter-flick and settles. No linger —
-//      motion starts on the exact frame the key comes up.
+// Drift fishtail — purely visual yaw on carBody. Body stays neutral during
+// the turn (so the actual yaw reads cleanly) and only kicks at the END:
+// release fires a velocity impulse opposite the steer direction, and an
+// underdamped spring back to 0 sweeps through into a smaller counter-flick
+// before settling.
 let fishtailYaw = 0;
 let fishtailYawVel = 0;
 let prevSteerInput = 0;
 const FISHTAIL_OMEGA        = 6.5;  // rad/s — natural frequency
-const FISHTAIL_DAMP_PRESS   = 1.0;  // critical: no overshoot on press
-const FISHTAIL_DAMP_RELEASE = 0.5;  // underdamped: counter-flick on swing-back
-const FISHTAIL_HOLD_OFFSET  = 0.22; // ~12.5° rear-out while turning
-const FISHTAIL_RELEASE_KICK = 1.5;  // velocity impulse on release
+const FISHTAIL_DAMP          = 0.5; // underdamped: counter-flick on swing-back
+const FISHTAIL_RELEASE_KICK = 2;    // velocity impulse on release
 
 // Smoothed copies of pitch/roll. Now that steerOutLag is ~0, rollFraction
 // snaps to 0 on release — driving carBody.rotation.z and the wheel tilt
@@ -1070,11 +1066,10 @@ function tick() {
       fishtailYawVel += -Math.sign(prevSteerInput) * FISHTAIL_RELEASE_KICK * fishtailScale;
     }
     prevSteerInput = steerNow;
-    const fishTarget = steerNow * FISHTAIL_HOLD_OFFSET * fishtailScale;
-    const fishDamp = steerNow !== 0 ? FISHTAIL_DAMP_PRESS : FISHTAIL_DAMP_RELEASE;
+    // Spring always pulls toward 0 — no held offset during the turn.
     const fishAccel =
-      (fishTarget - fishtailYaw) * FISHTAIL_OMEGA * FISHTAIL_OMEGA
-      - fishtailYawVel * 2 * fishDamp * FISHTAIL_OMEGA;
+      -fishtailYaw * FISHTAIL_OMEGA * FISHTAIL_OMEGA
+      - fishtailYawVel * 2 * FISHTAIL_DAMP * FISHTAIL_OMEGA;
     fishtailYawVel += fishAccel * dt;
     fishtailYaw += fishtailYawVel * dt;
     carBody.rotation.y = fishtailYaw;
