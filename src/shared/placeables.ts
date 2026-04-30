@@ -66,6 +66,18 @@ export interface PlaceableDef {
    *  free-cursor follow + the scale modifier (size = ROAD_TILE
    *  exactly so adjacent chunks meet flush). */
   snapToGrid?: boolean;
+  /** When set on a GLB/GLTF asset, prune every mesh whose material
+   *  name doesn't match. Pass a single name or a list (any-of) — lets
+   *  us expose a sub-part of a multi-material model (e.g. the IBM
+   *  terminal monitor: chassis + display, no keyboard) as its own
+   *  placeable without splitting the asset file. */
+  materialFilter?: string | string[];
+  /** Drop every triangle whose world-Y centroid sits below
+   *  `bbox.min.y + fraction * height`. Used to slice off the lower
+   *  half of a model when the part we want shares a single mesh /
+   *  material with the part we don't (e.g. removing the IBM 3178
+   *  base from the monitor case — both are the same chassis mesh). */
+  clipBelowYFraction?: number;
 }
 
 export const PLACEABLES: PlaceableDef[] = [
@@ -107,6 +119,14 @@ export const PLACEABLES: PlaceableDef[] = [
   { id: 'Log2',    category: 'prop', label: 'Log B',   dot: '#a16207', targetSize: 2.5, source: '/models/nature/Log2.obj' },
   // Electronics
   { id: 'IBM_3178', category: 'electronics', label: 'IBM 3178', dot: '#a3a3a3', targetSize: 4, source: '/models/electronics/ibm_3178.glb' },
+  // Monitor unit only — chassis (`ibm_3178`) + CRT panel (`display`),
+  // keyboard mesh stripped. Same source GLB as the full terminal.
+  // Chassis mesh contains BOTH the monitor case and the bottom base
+  // box (single material), so we additionally clip the lower 28% of
+  // the geometry — that's just below the case's rounded underside,
+  // above the swivel/base. Higher fractions cut into the case and
+  // expose the interior backfaces (case is a hollow shell).
+  { id: 'IBM_3178_Monitor', category: 'electronics', label: 'IBM 3178 Monitor', dot: '#22d3ee', targetSize: 3, source: '/models/electronics/ibm_3178.glb', materialFilter: ['ibm_3178', 'display'], clipBelowYFraction: 0.28 },
   // Aircraft
   { id: 'Plane', category: 'aircraft', label: 'Plane', dot: '#a78bfa', targetSize: 4, source: '/models/aircraft/plane.glb' },
 ];
@@ -118,6 +138,80 @@ export function findPlaceable(id: string): PlaceableDef | undefined {
 const fbxLoader = new FBXLoader();
 const objLoader = new OBJLoader();
 const glbLoader = new GLTFLoader();
+
+/** Drop every triangle whose world-Y centroid sits below
+ *  `bbox.min.y + fraction * height`. Compacts each mesh's attribute
+ *  arrays to only the surviving vertices so the bbox afterwards is
+ *  honest (computeBoundingBox reads the position attribute, not the
+ *  index — leaving stale vertices in place would inflate it). */
+export function clipBelowWorldYFraction(root: THREE.Object3D, fraction: number): void {
+  root.updateMatrixWorld(true);
+  const bbox = new THREE.Box3().setFromObject(root);
+  if (!isFinite(bbox.min.y) || !isFinite(bbox.max.y)) return;
+  const cutY = bbox.min.y + (bbox.max.y - bbox.min.y) * fraction;
+  const v = new THREE.Vector3();
+  const orphans: THREE.Mesh[] = [];
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!(mesh as any).isMesh) return;
+    const src = mesh.geometry as THREE.BufferGeometry;
+    const pos = src.attributes.position as THREE.BufferAttribute | undefined;
+    if (!pos) return;
+    const idx = src.index;
+    const triCount = idx ? idx.count / 3 : pos.count / 3;
+    const keepTris: number[] = [];
+    for (let t = 0; t < triCount; t++) {
+      const ia = idx ? idx.getX(t * 3)     : t * 3;
+      const ib = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+      const ic = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      // Require ALL three vertices above the cut. Centroid-only let
+      // large triangles that span the cut survive, leaving "skirts"
+      // hanging into the removed region.
+      let allAbove = true;
+      for (const i of [ia, ib, ic]) {
+        v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mesh.matrixWorld);
+        if (v.y <= cutY) { allAbove = false; break; }
+      }
+      if (allAbove) keepTris.push(ia, ib, ic);
+    }
+    if (keepTris.length === 0) {
+      orphans.push(mesh);
+      return;
+    }
+    if (keepTris.length === triCount * 3) return; // nothing dropped
+    // Compact: build a remap so the new attribute arrays only carry
+    // referenced vertices. Otherwise computeBoundingBox would still
+    // include the dropped vertices.
+    const remap = new Map<number, number>();
+    const newIdx: number[] = [];
+    for (const i of keepTris) {
+      let n = remap.get(i);
+      if (n === undefined) {
+        n = remap.size;
+        remap.set(i, n);
+      }
+      newIdx.push(n);
+    }
+    const newGeom = new THREE.BufferGeometry();
+    for (const name of Object.keys(src.attributes)) {
+      const srcAttr = src.attributes[name] as THREE.BufferAttribute;
+      const itemSize = srcAttr.itemSize;
+      const ArrCtor = (srcAttr.array as any).constructor;
+      const newArr = new ArrCtor(remap.size * itemSize);
+      for (const [origI, newI] of remap) {
+        for (let c = 0; c < itemSize; c++) {
+          newArr[newI * itemSize + c] = (srcAttr.array as any)[origI * itemSize + c];
+        }
+      }
+      newGeom.setAttribute(name, new THREE.BufferAttribute(newArr, itemSize));
+    }
+    newGeom.setIndex(newIdx);
+    newGeom.computeBoundingBox();
+    newGeom.computeBoundingSphere();
+    mesh.geometry = newGeom;
+  });
+  for (const m of orphans) m.removeFromParent();
+}
 
 let _naturePalette: THREE.Texture | null = null;
 function getNaturePalette(): THREE.Texture {
@@ -164,6 +258,38 @@ export async function loadPlaceable(def: PlaceableDef): Promise<THREE.Object3D> 
         map: palette, roughness: 0.85, metalness: 0.05,
       });
     });
+  }
+  // Material filter: prune meshes whose material doesn't match. Done
+  // *before* the bbox normalize below so the surviving sub-part fills
+  // its targetSize on its own (e.g. the display panel scales to 2.5
+  // units, ignoring the chassis it was packaged with).
+  if (def.materialFilter) {
+    const allow = new Set(Array.isArray(def.materialFilter) ? def.materialFilter : [def.materialFilter]);
+    const keep: THREE.Mesh[] = [];
+    raw.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!(mesh as any).isMesh) return;
+      const mat = mesh.material as THREE.Material | THREE.Material[];
+      const name = Array.isArray(mat) ? mat[0]?.name : mat?.name;
+      if (name && allow.has(name)) keep.push(mesh);
+    });
+    const filtered = new THREE.Group();
+    filtered.name = `${raw.name || 'asset'}-filtered`;
+    for (const src of keep) {
+      // Clone (geometry/material refs reused — cheap) so we don't
+      // detach nodes from a tree the GLTFLoader may hand to another
+      // caller. Bake world transform onto the clone so the new parent
+      // group doesn't have to inherit the GLB's rotation/scale chain.
+      src.updateWorldMatrix(true, false);
+      const m = src.clone(false);
+      m.matrix.copy(src.matrixWorld);
+      m.matrix.decompose(m.position, m.quaternion, m.scale);
+      filtered.add(m);
+    }
+    raw = filtered;
+  }
+  if (def.clipBelowYFraction !== undefined) {
+    clipBelowWorldYFraction(raw, def.clipBelowYFraction);
   }
   const box = new THREE.Box3().setFromObject(raw);
   const size = new THREE.Vector3();

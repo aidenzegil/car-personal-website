@@ -22,6 +22,7 @@ import {
   CarWheelState,
   WheelStrategy,
 } from './shared/scene';
+import { clipBelowWorldYFraction } from './shared/placeables';
 
 // Per-car wheel rotation strategies. Each Designersoup model authored its
 // wheels differently — there's no clean generic detection that works for
@@ -305,6 +306,41 @@ const ASSETS: AssetEntry[] = [
       // the whole viewport. Shrink so the terminal sits comfortably
       // in frame at the default camera distance, with room around it
       // (a desk-toy sized object on the showcase platform).
+      const box = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if (maxDim > 0) root.scale.multiplyScalar(2.0 / maxDim);
+      return root;
+    },
+  },
+  {
+    category: 'electronics',
+    name: 'IBM 3178 Monitor',
+    source: '/models/electronics/ibm_3178.glb',
+    dot: '#22d3ee',
+    notes: 'Monitor unit extracted from the IBM 3178 GLB — chassis + CRT screen, keyboard mesh stripped. Chassis mesh shares one material with the bottom base box, so we additionally clip the lower 28% of the geometry to leave just the head.',
+    async build() {
+      const gltf = await glbLoader.loadAsync('/models/electronics/ibm_3178.glb');
+      const root = new THREE.Group();
+      root.name = 'ibm-3178-monitor';
+      const allow = new Set(['ibm_3178', 'display']);
+      gltf.scene.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!(mesh as any).isMesh) return;
+        const mat = mesh.material as THREE.Material | THREE.Material[];
+        const name = Array.isArray(mat) ? mat[0]?.name : mat?.name;
+        if (!name || !allow.has(name)) return;
+        // Bake world transform onto a clone so we drop the GLB's
+        // root rotation chain — keeps the unit facing camera the
+        // same way as the full terminal entry.
+        mesh.updateWorldMatrix(true, false);
+        const m = mesh.clone(false);
+        m.matrix.copy(mesh.matrixWorld);
+        m.matrix.decompose(m.position, m.quaternion, m.scale);
+        root.add(m);
+      });
+      clipBelowWorldYFraction(root, 0.28);
       const box = new THREE.Box3().setFromObject(root);
       const size = new THREE.Vector3();
       box.getSize(size);
@@ -1009,6 +1045,8 @@ function tick() {
 // independent of camera or rendering.
 (window as any).__lib = {
   THREE,
+  scene, camera, controls,
+  glbLoader,
   get assets() { return ASSETS.map((a) => ({ name: a.name, source: a.source })); },
   get activeIndex() { return activeIndex; },
   get activeAsset() { return activeAsset; },
@@ -1017,6 +1055,25 @@ function tick() {
   pressKey(key: string) { keys.add(key.toLowerCase()); },
   releaseKey(key: string) { keys.delete(key.toLowerCase()); },
   clearKeys() { keys.clear(); },
+  /** Mount an arbitrary Object3D in place of the current asset. Test
+   *  hook so we can sweep parameter values without editing the
+   *  ASSETS table. Reuses the showcase platform / lighting. */
+  mountCustom(obj: THREE.Object3D) {
+    if (activeAsset) {
+      scene.remove(activeAsset);
+      activeAsset.traverse((n) => {
+        const m = n as THREE.Mesh;
+        if ((m as any).isMesh) {
+          (m.geometry as any)?.dispose?.();
+          const mat = m.material as THREE.Material | THREE.Material[];
+          if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+          else mat?.dispose?.();
+        }
+      });
+    }
+    activeAsset = obj;
+    scene.add(obj);
+  },
 };
 
 function resize() {

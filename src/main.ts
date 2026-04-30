@@ -701,7 +701,11 @@ async function buildUserPlacements(): Promise<void> {
     let obj: THREE.Object3D;
     try { obj = await loadPlaceableAsset(def); }
     catch (err) { console.warn('skipping placement, asset failed to load', p, err); return; }
-    obj.scale.multiplyScalar(p.scale);
+    // The editor always runs at WORLD_SCALE = 1, so stored x/z/scale
+    // are in unscaled world units. Pet mode renders the world at
+    // WORLD_SCALE = 0.5 — without these multiplies placements end up
+    // double-size and land outside the tile grid.
+    obj.scale.multiplyScalar(p.scale * WORLD_SCALE);
     obj.rotation.y = p.rotY;
     applyVoidToTree(obj);
     obj.traverse((node) => {
@@ -709,15 +713,18 @@ async function buildUserPlacements(): Promise<void> {
     });
     let groundOffsetY: number;
     if (def.snapToGrid) {
-      // Roads carry their own Y lift internally; preserve it.
-      groundOffsetY = obj.position.y;
+      // Roads carry their own Y lift internally; shrink it with the
+      // world so the surface still sits flush on (smaller) tiles.
+      groundOffsetY = obj.position.y * WORLD_SCALE;
     } else {
       const box = new THREE.Box3().setFromObject(obj);
       groundOffsetY = -box.min.y;
     }
-    obj.position.set(p.x, -INTRO_DROP, p.z);
+    const wx = p.x * WORLD_SCALE;
+    const wz = p.z * WORLD_SCALE;
+    obj.position.set(wx, -INTRO_DROP, wz);
     scene.add(obj);
-    userPlaced.push({ obj, tileIdx: userTileIdxFor(p.x, p.z), groundOffsetY });
+    userPlaced.push({ obj, tileIdx: userTileIdxFor(wx, wz), groundOffsetY });
   }));
   userPlacementsReady = true;
 }
@@ -1071,12 +1078,146 @@ interface PetController {
 let petController: PetController | null = null;
 
 const PET_CLIP_RUN = 'CorgiRun';
-// Idle pool — cycled randomly when no input.
-const PET_IDLE_POOL = [
-  'CorgiIdle', 'CorgiIdleSniff', 'CorgiIdleDig', 'CorgiIdleMouthClosed', 'CorgiIdleBarking',
+
+// Idle behavior — posture-aware scene scheduler. The corgi cycles
+// through "scenes" (named sequences of clips) keyed by starting posture
+// (standing/sitting/laying). Each scene ends in some posture; the next
+// scene is picked from those that start in that posture.
+//
+// Plain standing-idles dominate the pool intentionally — long stretches
+// of nothing-special make the busier moments (scratch, bark, dig→eat)
+// feel like actual events instead of a clip jukebox.
+type PetPosture = 'standing' | 'sitting' | 'laying';
+
+type PetStep =
+  | { kind: 'loop'; clip: string; hold: number }  // looping clip held N seconds
+  | { kind: 'once'; clip: string };                // one-shot, plays full duration
+
+interface PetScene {
+  weight: number;
+  start: PetPosture;
+  end: PetPosture;
+  steps: PetStep[];
+}
+
+const PET_SCENES: PetScene[] = [
+  // ── Standing: just be a dog ────────────────────────────────────────
+  // Plain idles weighted heavily so the dog spends most of its time
+  // doing nothing in particular — that's the point.
+  { weight: 6, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdle', hold: 5 },
+  ]},
+  { weight: 5, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleLong', hold: 9 },
+  ]},
+  { weight: 3, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleMouthClosed', hold: 4 },
+    { kind: 'loop', clip: 'CorgiIdle', hold: 3 },
+  ]},
+  // Sniff around
+  { weight: 3, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleSniff', hold: 5 },
+  ]},
+  { weight: 2, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleSniff', hold: 3.5 },
+    { kind: 'loop', clip: 'CorgiIdle', hold: 2 },
+    { kind: 'loop', clip: 'CorgiIdleSniff', hold: 3 },
+  ]},
+  // Bark — used sparingly so it stays an event, not background noise.
+  { weight: 1, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleBarking', hold: 4 },
+    { kind: 'loop', clip: 'CorgiIdle', hold: 2.5 },
+  ]},
+  { weight: 1, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleBarkingLong', hold: 6 },
+  ]},
+  // Dig → eat: found a treat. Showcase chain.
+  { weight: 2, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleDig', hold: 5 },
+    { kind: 'once', clip: 'CorgiIdleToConsume' },
+    { kind: 'once', clip: 'CorgiEat' },
+    { kind: 'once', clip: 'CorgiConsumeToIdle' },
+  ]},
+  // Dig and walk away (no treat).
+  { weight: 1, start: 'standing', end: 'standing', steps: [
+    { kind: 'loop', clip: 'CorgiIdleDig', hold: 4 },
+    { kind: 'loop', clip: 'CorgiIdleSniff', hold: 3 },
+  ]},
+  // Drink
+  { weight: 1, start: 'standing', end: 'standing', steps: [
+    { kind: 'once', clip: 'CorgiIdleToConsume' },
+    { kind: 'once', clip: 'CorgiDrink' },
+    { kind: 'once', clip: 'CorgiConsumeToIdle' },
+  ]},
+
+  // ── Standing → Sitting ─────────────────────────────────────────────
+  { weight: 3, start: 'standing', end: 'sitting', steps: [
+    { kind: 'once', clip: 'CorgiIdleToSit' },
+  ]},
+
+  // ── Sitting ────────────────────────────────────────────────────────
+  { weight: 4, start: 'sitting', end: 'sitting', steps: [
+    { kind: 'loop', clip: 'CorgiSitIdle', hold: 5 },
+  ]},
+  { weight: 3, start: 'sitting', end: 'sitting', steps: [
+    { kind: 'loop', clip: 'CorgiSitIdleLong', hold: 9 },
+  ]},
+  // Sit, scratch, settle back — the classic.
+  { weight: 3, start: 'sitting', end: 'sitting', steps: [
+    { kind: 'loop', clip: 'CorgiSitIdle', hold: 2.5 },
+    { kind: 'loop', clip: 'CorgiSitScratch', hold: 4.5 },
+    { kind: 'loop', clip: 'CorgiSitIdle', hold: 3 },
+  ]},
+
+  // ── Sitting → Standing ─────────────────────────────────────────────
+  { weight: 3, start: 'sitting', end: 'standing', steps: [
+    { kind: 'once', clip: 'CorgiSitToIdle' },
+  ]},
+
+  // ── Sitting → Laying ───────────────────────────────────────────────
+  { weight: 2, start: 'sitting', end: 'laying', steps: [
+    { kind: 'once', clip: 'CorgiSitToLay' },
+  ]},
+
+  // ── Standing → Laying (direct flop) ────────────────────────────────
+  { weight: 2, start: 'standing', end: 'laying', steps: [
+    { kind: 'once', clip: 'CorgiIdleToLay' },
+  ]},
+
+  // ── Laying ─────────────────────────────────────────────────────────
+  { weight: 4, start: 'laying', end: 'laying', steps: [
+    { kind: 'loop', clip: 'CorgiLayIdle', hold: 7 },
+  ]},
+  { weight: 4, start: 'laying', end: 'laying', steps: [
+    { kind: 'loop', clip: 'CorgiLayIdleLong', hold: 11 },
+  ]},
+  // Deep rest.
+  { weight: 3, start: 'laying', end: 'laying', steps: [
+    { kind: 'loop', clip: 'CorgiLayRest', hold: 9 },
+    { kind: 'loop', clip: 'CorgiLayIdle', hold: 3 },
+  ]},
+  // Sit up to scratch, then back down. User-requested chain.
+  { weight: 2, start: 'laying', end: 'laying', steps: [
+    { kind: 'once', clip: 'CorgiLayToSit' },
+    { kind: 'loop', clip: 'CorgiSitScratch', hold: 4 },
+    { kind: 'loop', clip: 'CorgiSitIdle', hold: 1.5 },
+    { kind: 'once', clip: 'CorgiSitToLay' },
+  ]},
+
+  // ── Laying → Sitting ───────────────────────────────────────────────
+  { weight: 2, start: 'laying', end: 'sitting', steps: [
+    { kind: 'once', clip: 'CorgiLayToSit' },
+  ]},
+
+  // ── Laying → Standing ──────────────────────────────────────────────
+  { weight: 2, start: 'laying', end: 'standing', steps: [
+    { kind: 'once', clip: 'CorgiLayToIdle' },
+  ]},
 ];
-const PET_IDLE_MIN_DURATION = 3.5;
-const PET_IDLE_MAX_DURATION = 6.0;
+
+// Crossfade between scene steps. Tighter than run↔idle so transition
+// clips (e.g. SitToIdle) read as discrete motion, not a long blend.
+const PET_STEP_CROSSFADE = 0.25;
 
 // 8-direction snap movement. WASD = N/W/S/E (with diagonals via two
 // keys). The corgi rotates to face the direction of motion. No
@@ -1101,13 +1242,26 @@ function createPetController(root: THREE.Object3D, loader: FBXLoader): PetContro
   let currentName: string | null = null;
   let pending: string | null = null; // most recent clip request, even pre-load
 
-  /** Strip root-motion translation tracks from a clip so the corgi
-   *  stays in place under skeleton control — our PetController owns
-   *  world position via carRig, the clip only owns the in-place pose.
-   *  Without this every frame's mixer.update yanks the mesh ~94 world
-   *  units away from carRig (Mixamo-style root motion baked in). */
+  /** Lock X/Z on every position track so the corgi stays in place
+   *  under skeleton control — our PetController owns world position
+   *  via carRig, the clip only owns the in-place pose. Without this
+   *  every frame's mixer.update yanks the mesh ~94 world units away
+   *  from carRig (Mixamo-style root motion baked in). Y is preserved
+   *  because sit/lay clips encode the body's vertical descent in the
+   *  hip's Y track — stripping that left the dog floating at standing
+   *  height while the legs folded underneath. */
   function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
-    clip.tracks = clip.tracks.filter((t) => !/\.position$/.test(t.name));
+    for (const track of clip.tracks) {
+      if (!/\.position$/.test(track.name)) continue;
+      const values = track.values as Float32Array;
+      if (values.length < 3) continue;
+      const x0 = values[0]!;
+      const z0 = values[2]!;
+      for (let i = 0; i < values.length; i += 3) {
+        values[i]     = x0;
+        values[i + 2] = z0;
+      }
+    }
     return clip;
   }
 
@@ -1160,13 +1314,92 @@ function createPetController(root: THREE.Object3D, loader: FBXLoader): PetContro
 
   // Animation state machine.
   let animState: PetAnimState = 'idle';
-  let idleTimer = 0;
-  function pickIdle() {
-    const id = PET_IDLE_POOL[Math.floor(Math.random() * PET_IDLE_POOL.length)]!;
-    play(id);
-    idleTimer = PET_IDLE_MIN_DURATION + Math.random() * (PET_IDLE_MAX_DURATION - PET_IDLE_MIN_DURATION);
+
+  // Scene scheduler state. `posture` is what we're in *now* (after the
+  // current scene began); `scene` is the active sequence; `stepIndex`
+  // is the next step to play. `stepTimer` counts down the current
+  // step's hold (loop) or duration (once). `stepLoading` blocks the
+  // tick from advancing while we're awaiting an FBX fetch — without it
+  // a slow load would let the timer underflow and trigger duplicate
+  // startStep calls. `sceneToken` invalidates pending awaits when we
+  // cancel (e.g. on user input).
+  let posture: PetPosture = 'standing';
+  let scene: PetScene | null = null;
+  let stepIndex = 0;
+  let stepTimer = 0;
+  let stepLoading = false;
+  let sceneToken = 0;
+
+  function pickScene(): PetScene {
+    let total = 0;
+    for (const s of PET_SCENES) if (s.start === posture) total += s.weight;
+    let r = Math.random() * total;
+    for (const s of PET_SCENES) {
+      if (s.start !== posture) continue;
+      r -= s.weight;
+      if (r <= 0) return s;
+    }
+    return PET_SCENES.find((s) => s.start === posture)!;
   }
-  pickIdle();
+
+  async function startStep() {
+    if (!scene) return;
+    const myToken = sceneToken;
+    const step = scene.steps[stepIndex];
+    if (!step) {
+      // Scene complete — commit its end posture and queue the next one.
+      posture = scene.end;
+      scene = null;
+      queueNextScene();
+      return;
+    }
+    stepLoading = true;
+    let clip: THREE.AnimationClip;
+    try {
+      clip = await ensureClip(step.clip);
+    } catch (err) {
+      console.warn('pet scene clip load failed', step.clip, err);
+      if (myToken !== sceneToken) return;
+      stepIndex++;
+      stepLoading = false;
+      void startStep();
+      return;
+    }
+    if (myToken !== sceneToken) return;
+    const isLoop = step.kind === 'loop';
+    playLoaded(clip, { loop: isLoop, crossfade: PET_STEP_CROSSFADE });
+    // Keep play()'s currentName/pending in sync — startStep bypasses
+    // play() (we already have the clip), but if we don't update these,
+    // a later play(PET_CLIP_RUN) hits play()'s `currentName === name`
+    // early-return and the run clip never actually starts.
+    currentName = step.clip;
+    pending = step.clip;
+    // For one-shots fall back to clip duration; clamp away from zero
+    // so a 0-length clip doesn't pin the scheduler in a tight loop.
+    stepTimer = isLoop ? step.hold : Math.max(0.2, clip.duration);
+    stepIndex++;
+    stepLoading = false;
+  }
+
+  function queueNextScene() {
+    scene = pickScene();
+    stepIndex = 0;
+    stepTimer = 0;
+    void startStep();
+  }
+
+  /** Cancel any in-flight scene step and reset posture. Called when
+   *  the user starts running — we snap to standing under the crossfade
+   *  rather than animating SitToIdle/LayToIdle first, which would gate
+   *  movement behind a 1-2s wakeup. */
+  function cancelScene() {
+    sceneToken++;
+    scene = null;
+    stepLoading = false;
+    posture = 'standing';
+  }
+
+  queueNextScene();
 
   // Input state — separate listener so we don't share with flightControls
   // (which doesn't exist in pet mode anyway). Stored uppercase code for
@@ -1217,6 +1450,7 @@ function createPetController(root: THREE.Object3D, loader: FBXLoader): PetContro
       if (moving) {
         if (animState !== 'running') {
           animState = 'running';
+          cancelScene();
           play(PET_CLIP_RUN, { crossfade: PET_CROSSFADE });
         }
         // Yaw: lerp toward the target direction along the shorter
@@ -1229,10 +1463,10 @@ function createPetController(root: THREE.Object3D, loader: FBXLoader): PetContro
         carRig.rotation.y = displayYaw;
       } else if (animState === 'running') {
         animState = 'idle';
-        pickIdle();
-      } else {
-        idleTimer -= dt;
-        if (idleTimer <= 0) pickIdle();
+        queueNextScene();
+      } else if (scene && !stepLoading) {
+        stepTimer -= dt;
+        if (stepTimer <= 0) void startStep();
       }
 
       // Speed: ease toward target. Velocity always points along the
