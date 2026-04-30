@@ -10,7 +10,7 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CSS3DRenderer, CSS3DObject } from 'three/examples/jsm/renderers/CSS3DRenderer.js';
+import { CSS3DRenderer, CSS3DObject, mountHtmlOnMesh, makeMeshAlphaHole } from './shared/iframe-mount';
 import {
   attachHover, tickHover,
   polishCarMaterials,
@@ -599,131 +599,15 @@ const cssLayer = cssRenderer.domElement;
 cssLayer.style.position = 'absolute';
 cssLayer.style.top = '0';
 cssLayer.style.left = '0';
-// Block iframe interaction by default — without this, the iframe
-// swallows pointer events and OrbitControls stops working. Specific
-// iframes can opt back in via element.style.pointerEvents = 'auto'.
+// pointer-events: none on the wrapper passes clicks through to the
+// canvas + nav links. Specific iframes opt back in when focused.
 cssLayer.style.pointerEvents = 'none';
-// Make sure the CSS layer sits behind the WebGL canvas in stacking
-// order so the WebGL pixels paint on top.
-cssLayer.style.zIndex = '0';
-canvas.style.position = 'relative';
-canvas.style.zIndex = '1';
+// Negative z-index puts the iframe layer behind the canvas AND any
+// auto-z siblings (title-bar / info-panel). Earlier we used z:0
+// here + z:1 on the canvas, but that pushed the canvas above the
+// nav links and absorbed their clicks.
+cssLayer.style.zIndex = '-1';
 canvas.parentElement!.appendChild(cssLayer);
-
-// ---- HTML-on-mesh helper ----
-//
-// Mount an iframe (or arbitrary HTMLElement) onto the front face of
-// a mesh, sized to its local-bbox dimensions. The CSS3DObject is
-// added as a child of the mesh, so any rotation/scale on the mesh's
-// parent chain is inherited automatically — no need to recompute the
-// transform when the parent moves.
-//
-// The "front face" is taken to be the plane perpendicular to the
-// mesh's smallest local-bbox dimension. For the IBM 3178 display
-// mesh that's the screen plane (it's modelled as a thin slab with
-// the screen face being the largest two axes).
-function mountHtmlOnMesh(
-  mesh: THREE.Mesh,
-  html: string,
-  opts?: { density?: number; backgroundColor?: string },
-): { css: CSS3DObject; iframe: HTMLIFrameElement } {
-  mesh.geometry.computeBoundingBox();
-  const lbbox = mesh.geometry.boundingBox!;
-  const lsize = new THREE.Vector3(); lbbox.getSize(lsize);
-  const lcenter = new THREE.Vector3(); lbbox.getCenter(lcenter);
-  // Sort local axes by extent. Smallest = depth (screen-normal axis).
-  const dims = [
-    { axis: 0, size: lsize.x },
-    { axis: 1, size: lsize.y },
-    { axis: 2, size: lsize.z },
-  ].sort((a, b) => a.size - b.size);
-  const depthAxis = dims[0]!.axis;
-  const planeAxes = dims.slice(1).sort((a, b) => b.size - a.size);
-  const wAxisIdx = planeAxes[0]!.axis;  // larger non-depth axis = screen width
-  const wLocal = planeAxes[0]!.size;
-  const hLocal = planeAxes[1]!.size;
-
-  // Determine which side of the slab is the screen "front" by summing
-  // vertex normals along the depth axis — for a slab with a bowed
-  // CRT face, the front face contributes far more to the sum than
-  // the (often missing or flat) back face. Sign tells us +depthAxis
-  // or -depthAxis is the outward direction.
-  const normalAttr = mesh.geometry.attributes.normal as THREE.BufferAttribute | undefined;
-  let normalSum = 0;
-  if (normalAttr) {
-    for (let i = 0; i < normalAttr.count; i++) {
-      normalSum += normalAttr.getComponent(i, depthAxis);
-    }
-  }
-  const depthSign = normalSum >= 0 ? 1 : -1;
-
-  // Build a right-handed orthonormal basis where:
-  //   ez = +screen-out direction (in mesh-local space)
-  //   ey = "screen up" — chosen so that AFTER the parent's world
-  //        rotation composes in, the iframe's local +Y still points
-  //        roughly along world +Y (text renders right-side up).
-  //   ex = ey × ez, perpendicular to both
-  // We pick a tentative ex along +wAxis, derive ey = ez × ex, then
-  // flip ex if ey ends up pointing downward in world space.
-  mesh.updateWorldMatrix(true, false);
-  const meshWorldRot = new THREE.Quaternion();
-  mesh.matrixWorld.decompose(new THREE.Vector3(), meshWorldRot, new THREE.Vector3());
-  const ez = new THREE.Vector3().setComponent(depthAxis, depthSign);
-  let ex = new THREE.Vector3().setComponent(wAxisIdx, 1);
-  let ey = new THREE.Vector3().crossVectors(ez, ex);
-  const eyWorldY = ey.clone().applyQuaternion(meshWorldRot).y;
-  if (eyWorldY < 0) {
-    ex.negate();
-    ey = new THREE.Vector3().crossVectors(ez, ex);
-  }
-
-  const density = opts?.density ?? 80;
-  const wPx = Math.max(64, Math.round(wLocal * density));
-  const hPx = Math.max(64, Math.round(hLocal * density));
-  const iframe = document.createElement('iframe');
-  iframe.srcdoc = html;
-  iframe.style.border = '0';
-  iframe.style.background = opts?.backgroundColor ?? '#000';
-  iframe.style.width = `${wPx}px`;
-  iframe.style.height = `${hPx}px`;
-  // The CSS3D layer's pointer-events is none (so OrbitControls keeps
-  // working); re-enable on the iframe itself for interaction.
-  iframe.style.pointerEvents = 'auto';
-  const css = new CSS3DObject(iframe);
-  // Push the iframe forward to the slab's front face so it pops out
-  // in front of any case interior geometry behind it (the IBM display
-  // is modelled as a thin slab; the bbox center sits inside the
-  // chassis cavity and gets occluded by the back wall of the case).
-  const halfDepth = lsize.getComponent(depthAxis) / 2;
-  css.position.copy(lcenter).addScaledVector(ez, halfDepth);
-  css.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(ex, ey, ez));
-  // 1 world-unit = `density` pixels. Scaling the CSS3DObject down by
-  // 1/density makes the iframe's CSS pixel dimensions match the mesh's
-  // local-bbox world size after the parent's transform composes in.
-  css.scale.setScalar(1 / density);
-  mesh.add(css);
-  return { css, iframe };
-}
-
-/** Punch a transparent (alpha=0) hole through the WebGL canvas in the
- *  shape of this mesh. Used to expose CSS3D content positioned behind
- *  the canvas. The mesh renders LAST (positive renderOrder + transparent)
- *  with NoBlending so its (rgba=0,0,0,0) fragment overwrites whatever
- *  was already painted there — turning that region of the canvas
- *  fully transparent. */
-function makeMeshAlphaHole(mesh: THREE.Mesh) {
-  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-  for (const m of mats) {
-    m.transparent = true;
-    m.opacity = 0;
-    m.depthWrite = false;
-    m.blending = THREE.NoBlending;
-  }
-  // Render after the chassis so we *overwrite* its pixels in the
-  // screen region. (Default blending would preserve dest alpha; we
-  // need NoBlending so source rgba=0,0,0,0 fully overwrites.)
-  mesh.renderOrder = 1;
-}
 
 // Demo content — vintage terminal text styled to match the IBM 3178's
 // own baked screen texture (green phosphor on black).
@@ -1091,6 +975,14 @@ function clearActive() {
       if (Array.isArray(m)) m.forEach((mm) => mm.dispose?.());
       else (m as THREE.Material | undefined)?.dispose?.();
     }
+    // CSS3DObject DOM elements are appended to cssRenderer's
+    // cameraElement on first render — without removing them here,
+    // a stale iframe would float around forever after the user
+    // switches to another asset.
+    const css = node as CSS3DObject & { isCSS3DObject?: boolean };
+    if (css.isCSS3DObject && css.element?.parentNode) {
+      css.element.parentNode.removeChild(css.element);
+    }
   });
   activeAsset = null;
 }
@@ -1329,6 +1221,10 @@ function tick() {
           const mat = m.material as THREE.Material | THREE.Material[];
           if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
           else mat?.dispose?.();
+        }
+        const css = n as CSS3DObject & { isCSS3DObject?: boolean };
+        if (css.isCSS3DObject && css.element?.parentNode) {
+          css.element.parentNode.removeChild(css.element);
         }
       });
     }

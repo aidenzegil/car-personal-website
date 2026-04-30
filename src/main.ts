@@ -14,6 +14,10 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { CSS3DRenderer, CSS3DObject, mountHtmlOnMesh } from './shared/iframe-mount';
+import { AIDEN_TERMINAL_HTML } from './shared/aiden-terminal-html';
+import { Font, FontLoader } from 'three/examples/jsm/loaders/FontLoader.js';
+import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js';
 import {
   attachHover, tickHover,
   polishCarMaterials,
@@ -167,11 +171,34 @@ window.addEventListener('hashchange', () => {
 const canvas = document.getElementById('hero-canvas') as HTMLCanvasElement | null;
 if (!canvas) throw new Error('hero canvas missing');
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, premultipliedAlpha: false, powerPreference: 'high-performance' });
+renderer.setClearAlpha(0);
 // DPR capped at 1.25 — chunky toon art doesn't read any sharper at 1.5
 // or 2.0, and 1.25 cuts fillrate ~30% vs 1.5 on Retina. Biggest single
 // perf knob.
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
+
+// CSS3DRenderer for HTML/iframes mapped onto the front face of in-world
+// monitors. Layered *behind* the WebGL canvas via z-index — opaque
+// chassis pixels naturally hide the iframe; an alpha-hole punched
+// through the canvas at the display mesh's silhouette reveals it.
+const cssRenderer = new CSS3DRenderer();
+const cssLayer = cssRenderer.domElement;
+cssLayer.style.position = 'absolute';
+cssLayer.style.top = '0';
+cssLayer.style.left = '0';
+// pointer-events: none on the wrapper passes clicks through to the
+// canvas (so OrbitControls + petController keep working) and to the
+// nav links overlaid on the stage. Iframe pointer-events flip to
+// 'auto' when the player focuses on a monitor, and at that point
+// we also drop pointer-events on the canvas so clicks reach the
+// iframe behind it (see tickMonitorFocus).
+cssLayer.style.pointerEvents = 'none';
+// Negative z-index keeps the iframe layer behind the canvas + the
+// HUD nav links — without this the canvas at z=1 was absorbing
+// clicks meant for the "Asset Library" / "World Editor" buttons.
+cssLayer.style.zIndex = '-1';
+canvas.parentElement!.appendChild(cssLayer);
 // Real shadow map for the car only — the floor receives, foliage does
 // not participate. Tight shadow camera frustum (set on the key light
 // below) keeps the depth pass to a tiny budget.
@@ -192,8 +219,14 @@ const SKY_COLOR  = 0xb8e2f5;
 // horizon. The world reads as a tile-island floating in sky instead of
 // columns rising out of dark earth.
 const VOID_COLOR = 0xb8e2f5;
-scene.background = new THREE.Color(SKY_COLOR);
+// scene.background is intentionally null so the alpha-cleared canvas
+// can punch through to the CSS3D iframe layer behind it (lazy-mounted
+// at the placed IBM monitor's screen face). The same sky color is
+// painted on the #stage container behind the canvas so the visual is
+// identical when no monitor is in view.
 scene.fog = new THREE.FogExp2(SKY_COLOR, 0.0055);
+const stageEl = canvas.parentElement;
+if (stageEl) (stageEl as HTMLElement).style.backgroundColor = '#' + SKY_COLOR.toString(16).padStart(6, '0');
 
 // Vertical "void" fog: an exponential fade toward VOID_COLOR keyed off
 // world Y (not camera distance). At y >= VOID_PLANE_Y nothing happens; at
@@ -682,6 +715,27 @@ interface UserPlacedInstance {
   obj: THREE.Object3D;
   tileIdx: number;
   groundOffsetY: number;
+  /** Set when this placement carries an interactive iframe (IBM
+   *  monitor) — the proximity system uses this to decide where to
+   *  pan the camera when the corgi walks up to it. */
+  monitor?: MonitorInstance;
+}
+interface MonitorInstance {
+  /** The display mesh (CRT face) — used as the camera focus target
+   *  and the hit-test for proximity. */
+  displayMesh: THREE.Mesh;
+  /** The original baked display material — restored when the player
+   *  walks away so the monitor's screen looks normal at idle (the
+   *  alpha-hole + iframe only live while engaged). */
+  originalMaterial: THREE.Material | THREE.Material[];
+  /** Lazily created alpha-hole material — same parameters as
+   *  `makeMeshAlphaHole`, but on a clone of the original so we can
+   *  swap back. */
+  alphaMaterial: THREE.Material | null;
+  /** Live CSS3DObject + iframe while engaged. The iframe is only
+   *  attached to the DOM during engagement, otherwise its srcdoc
+   *  could steal keyboard focus before the player ever approached. */
+  active: { css: CSS3DObject; iframe: HTMLIFrameElement } | null;
 }
 const userPlaced: UserPlacedInstance[] = [];
 let userPlacementsReady = false;
@@ -724,10 +778,455 @@ async function buildUserPlacements(): Promise<void> {
     const wz = p.z * WORLD_SCALE;
     obj.position.set(wx, -INTRO_DROP, wz);
     scene.add(obj);
-    userPlaced.push({ obj, tileIdx: userTileIdxFor(wx, wz), groundOffsetY });
+    // IBM monitor placements get an interactive iframe mapped onto
+    // their CRT face. We need the world transform settled (after the
+    // multiplyScalar + position.set above) before we sample the
+    // mesh's local bbox + apply the alpha hole.
+    let monitor: MonitorInstance | undefined;
+    if (p.assetId === 'IBM_3178_Monitor') {
+      obj.updateWorldMatrix(true, true);
+      monitor = mountIframeOnMonitor(obj);
+    }
+    userPlaced.push({ obj, tileIdx: userTileIdxFor(wx, wz), groundOffsetY, monitor });
   }));
   userPlacementsReady = true;
 }
+
+/** Locate the display mesh inside a loaded IBM_3178_Monitor placement.
+ *  The iframe is *not* mounted yet — we wait for proximity engagement
+ *  in `engageMonitor`. Mounting eagerly would let the iframe's auto-
+ *  focused search box steal keyboard input from the corgi controls. */
+function mountIframeOnMonitor(root: THREE.Object3D): MonitorInstance | undefined {
+  let displayMesh: THREE.Mesh | undefined;
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!(mesh as any).isMesh) return;
+    const mat = mesh.material as THREE.Material | THREE.Material[];
+    const name = Array.isArray(mat) ? mat[0]?.name : mat?.name;
+    if (name === 'display') displayMesh = mesh;
+  });
+  if (!displayMesh) return;
+  return {
+    displayMesh,
+    originalMaterial: displayMesh.material,
+    alphaMaterial: null,
+    active: null,
+  };
+}
+
+/** Swap the display mesh to its alpha-hole material and mount the
+ *  iframe. Called when the corgi enters proximity. */
+function engageMonitor(m: MonitorInstance) {
+  if (m.active) return;
+  if (!m.alphaMaterial) {
+    const src = Array.isArray(m.originalMaterial) ? m.originalMaterial[0]! : m.originalMaterial;
+    const alpha = src.clone();
+    alpha.transparent = true;
+    alpha.opacity = 0;
+    alpha.depthWrite = false;
+    alpha.blending = THREE.NoBlending;
+    m.alphaMaterial = alpha;
+  }
+  m.displayMesh.material = m.alphaMaterial;
+  m.displayMesh.renderOrder = 1;
+  // crtEffect: scanlines + vignette + slight desaturation so the
+  // terminal renders as if it's actually on a CRT.
+  const { css, iframe } = mountHtmlOnMesh(m.displayMesh, AIDEN_TERMINAL_HTML, {
+    pointerEvents: 'none',
+    crtEffect: true,
+  });
+  m.active = { css, iframe };
+}
+
+/** Tear down the alpha-hole + iframe so the monitor's screen looks
+ *  like a baked CRT face again at idle. */
+function disengageMonitor(m: MonitorInstance) {
+  if (!m.active) return;
+  // Remove the CSS3DObject from the mesh tree + detach its element
+  // (which may be a wrapper div when crtEffect is on, not the iframe
+  // directly) from the DOM so it stops hogging keyboard focus.
+  m.displayMesh.remove(m.active.css);
+  const el = m.active.css.element;
+  if (el?.parentNode) el.parentNode.removeChild(el);
+  m.active = null;
+  m.displayMesh.material = m.originalMaterial;
+  m.displayMesh.renderOrder = 0;
+}
+
+// ---- Monitor proximity / camera focus ----
+//
+// In pet mode, the corgi can walk up to a placed IBM 3178. When it
+// gets within MONITOR_TRIGGER_RADIUS the camera smoothly pans to
+// frame the screen, the iframe becomes interactive, and a 3D "PRESS
+// ESC" prompt floats above the monitor. ESC pans back out and locks
+// re-engagement until the corgi leaves the radius — no flickering
+// in/out at the boundary.
+const MONITOR_TRIGGER_RADIUS = 3.5 * WORLD_SCALE;
+// Composition: looking up at the monitor from slightly below screen
+// height, far enough back that the whole chassis frames cleanly, with
+// the dog in the lower foreground.
+//   - Dog auto-paths to DOG_SIT_DISTANCE in front of the screen.
+//   - Camera sits CAM_FOCUS_DISTANCE in front of the screen (further
+//     back than the dog) at CAM_FOCUS_Y_OFFSET below the screen's Y
+//     — gentle upward tilt, not a worm's-eye view.
+const DOG_SIT_DISTANCE = 3.0 * WORLD_SCALE;
+const CAM_FOCUS_DISTANCE = 8.0 * WORLD_SCALE;
+const CAM_FOCUS_Y_OFFSET = 0.1 * WORLD_SCALE;
+const DOG_PATH_TAU = 0.4;                        // ~exp lerp timeconstant
+const DOG_SIT_DIST_THRESHOLD = 0.12 * WORLD_SCALE; // close enough → sit
+const MONITOR_FOCUS_T_RATE = 1 / 0.6;            // 0..1 over ~0.6s
+type MonitorFocusPhase = 'in' | 'active' | 'out';
+interface MonitorFocusState {
+  inst: UserPlacedInstance;
+  monitor: MonitorInstance;
+  phase: MonitorFocusPhase;
+  /** 0 = roaming chase camera, 1 = fully focused on the screen. */
+  t: number;
+  /** Set true once the corgi reaches the sit spot; gates the
+   *  IdleToSit transition trigger so we only fire it once per focus. */
+  sitTriggered: boolean;
+}
+let monitorFocus: MonitorFocusState | null = null;
+// Test/inspection hook so playwright can read focus state without
+// invasive console logging.
+Object.defineProperty(window, '__monitorFocus', {
+  get: () => monitorFocus,
+});
+Object.defineProperty(window, '__escPrompt', {
+  get: () => ({
+    fontLoaded: !!escPromptFont,
+    meshExists: !!escPromptMesh,
+    meshVisible: escPromptMesh?.visible,
+    meshPos: escPromptMesh ? escPromptMesh.position.toArray() : null,
+  }),
+});
+/** True after an ESC exit until the corgi has left the trigger radius
+ *  again — prevents the camera from snapping right back into focus. */
+let monitorReengageBlocked = false;
+
+const _monitorTmpVec = new THREE.Vector3();
+const _monitorTmpVec2 = new THREE.Vector3();
+const _monitorTmpQuat = new THREE.Quaternion();
+
+/** Find the closest IBM monitor placement to the corgi's current XZ. */
+function nearestMonitor(): { inst: UserPlacedInstance; dist: number } | null {
+  let best: { inst: UserPlacedInstance; dist: number } | null = null;
+  for (const inst of userPlaced) {
+    if (!inst.monitor) continue;
+    inst.monitor.displayMesh.getWorldPosition(_monitorTmpVec);
+    const dx = _monitorTmpVec.x - carRig.position.x;
+    const dz = _monitorTmpVec.z - carRig.position.z;
+    const d = Math.hypot(dx, dz);
+    if (!best || d < best.dist) best = { inst, dist: d };
+  }
+  return best;
+}
+
+/** Compute the camera position + lookAt that frames a monitor's
+ *  screen face. Pulls back along the screen's outward normal so the
+ *  CRT fills the viewport. */
+interface MonitorComposition {
+  /** World-space midpoint of the screen (where the iframe lives). */
+  screenPos: THREE.Vector3;
+  /** Outward (screen-out) unit vector in world space. */
+  normal: THREE.Vector3;
+  /** Where the corgi should auto-path to and sit. */
+  dogTarget: THREE.Vector3;
+  /** Camera position for the over-the-shoulder framing. */
+  camPos: THREE.Vector3;
+  /** Camera lookAt — slightly above the screen-dog midpoint so the
+   *  monitor sits comfortably above the dog's head in frame. */
+  camLook: THREE.Vector3;
+}
+
+function computeMonitorComposition(monitor: MonitorInstance): MonitorComposition {
+  // Caller is responsible for engaging first — `active.css` is the
+  // authoritative screen-front world transform.
+  const css = monitor.active!.css;
+  const cssWorld = new THREE.Vector3();
+  css.getWorldPosition(cssWorld);
+  css.getWorldQuaternion(_monitorTmpQuat);
+  const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(_monitorTmpQuat).normalize();
+  const dogTarget = cssWorld.clone().addScaledVector(normal, DOG_SIT_DISTANCE);
+  // Drop the dog target to the floor — the corgi can't sit halfway
+  // up the screen. carRig.y rides at 0 in pet mode.
+  dogTarget.y = 0;
+  const camPos = cssWorld.clone().addScaledVector(normal, CAM_FOCUS_DISTANCE);
+  camPos.y = cssWorld.y + CAM_FOCUS_Y_OFFSET;
+  // Look directly at the screen center. Camera below screen Y → mild
+  // upward tilt. Dog at floor (y=0) is well below screen Y so it
+  // settles in the lower foreground naturally.
+  const camLook = cssWorld.clone();
+  return { screenPos: cssWorld, normal, dogTarget, camPos, camLook };
+}
+
+/** Apply a blended camera transform: at t=0, normal chase; at t=1,
+ *  fully focused on the monitor. Caller is responsible for advancing
+ *  `t` over time. We don't snap — both endpoints are computed each
+ *  frame so the chase camera stays "live" even mid-transition. */
+function updateCameraMonitorBlend(focus: MonitorFocusState, comp: MonitorComposition) {
+  const chasePos = _monitorTmpVec.set(
+    carRig.position.x + camOffset.x,
+    camOffset.y,
+    carRig.position.z + camOffset.z,
+  );
+  const chaseLook = _monitorTmpVec2.set(carRig.position.x, 0.6, carRig.position.z);
+  const u = focus.t * focus.t * (3 - 2 * focus.t);
+  camera.position.lerpVectors(chasePos, comp.camPos, u);
+  const look = chaseLook.clone().lerp(comp.camLook, u);
+  camera.lookAt(look);
+}
+
+// 3D "PRESS ESC TO EXIT" prompt. Lazy-loaded once on first focus —
+// the TextGeometry build is cheap but the FontLoader fetch isn't, and
+// most sessions never hit a monitor.
+let escPromptMesh: THREE.Mesh | null = null;
+let escPromptFont: Font | null = null;
+let escPromptFontPending = false;
+
+function ensureEscPrompt(): THREE.Mesh | null {
+  if (escPromptMesh) return escPromptMesh;
+  if (!escPromptFont) {
+    if (!escPromptFontPending) {
+      escPromptFontPending = true;
+      new FontLoader().load('/fonts/helvetiker_bold.typeface.json', (font) => {
+        escPromptFont = font;
+      });
+    }
+    return null;
+  }
+  // curveSegments: 1 keeps the bezel flat-shaded — chunky low-poly
+  // letterforms instead of smooth glyphs. depth gives them a bit of
+  // extruded thickness so they read as 3D, not flat sprites. Scale
+  // tracks WORLD_SCALE so the text matches the monitor in pet mode.
+  const geom = new TextGeometry('PRESS  ESC  TO  EXIT', {
+    font: escPromptFont,
+    size: 0.13 * WORLD_SCALE,
+    depth: 0.04 * WORLD_SCALE,
+    curveSegments: 1,
+    bevelEnabled: false,
+  });
+  geom.computeBoundingBox();
+  const bbox = geom.boundingBox!;
+  // Center the geometry so we can position by the text's midpoint.
+  geom.translate(-(bbox.max.x + bbox.min.x) / 2, -(bbox.max.y + bbox.min.y) / 2, -(bbox.max.z + bbox.min.z) / 2);
+  // Phosphor green to match the CRT vibe — emissive so it stays
+  // visible against the dark monitor case in any lighting.
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x4ade80,
+    emissive: 0x22c55e,
+    emissiveIntensity: 0.7,
+    roughness: 0.5,
+    metalness: 0.1,
+  });
+  escPromptMesh = new THREE.Mesh(geom, mat);
+  escPromptMesh.visible = false;
+  escPromptMesh.renderOrder = 2;  // paints over the chassis if it overlaps
+  scene.add(escPromptMesh);
+  return escPromptMesh;
+}
+
+/** Position the prompt above the focused monitor's screen, oriented
+ *  to face the camera (billboard-ish). Called every frame focus is
+ *  active so the prompt rides with the camera angle. */
+function updateEscPrompt(focus: MonitorFocusState) {
+  const mesh = ensureEscPrompt();
+  if (!mesh) return;
+  if (!focus.monitor.active) return;
+  const cssWorld = new THREE.Vector3();
+  focus.monitor.active.css.getWorldPosition(cssWorld);
+  const screenBox = new THREE.Box3().setFromObject(focus.monitor.displayMesh);
+  // Float just BELOW the screen's bottom edge — the camera frames
+  // monitor + dog head, and the space between them is the cleanest
+  // place for an on-screen prompt without clipping out of view.
+  const screenH = screenBox.max.y - screenBox.min.y;
+  mesh.position.set(cssWorld.x, screenBox.min.y - screenH * 0.18, cssWorld.z);
+  // Always face the camera. lookAt yaw-only would be more stable, but
+  // billboarding to the full camera transform reads well at this
+  // close range and avoids the prompt skewing under perspective.
+  mesh.lookAt(camera.position.x, mesh.position.y, camera.position.z);
+  // Fade in/out with the focus t so the prompt doesn't pop.
+  const u = focus.t * focus.t * (3 - 2 * focus.t);
+  (mesh.material as THREE.MeshStandardMaterial).opacity = u;
+  (mesh.material as THREE.MeshStandardMaterial).transparent = u < 1;
+  mesh.visible = u > 0.02;
+}
+
+function hideEscPrompt() {
+  if (escPromptMesh) escPromptMesh.visible = false;
+}
+
+/** Advance the focus state machine each frame. Returns `true` if the
+ *  state is "engaged" (camera blended away from chase) so the caller
+ *  can substitute the chase camera update. */
+function tickMonitorFocus(dt: number): boolean {
+  // Only meaningful in pet mode while we have placements + the corgi
+  // is alive (not falling, not in intro/teardown).
+  if (ACTIVE_CAR.mode !== 'pet' || isFalling || tearingDown || !introDone || !userPlacementsReady) {
+    if (monitorFocus) {
+      // Tear down focus if mode changed underneath us.
+      if (petController) petController.setInputBlocked(false);
+      hideEscPrompt();
+      disengageMonitor(monitorFocus.monitor);
+      canvas!.style.pointerEvents = 'auto';
+      monitorFocus = null;
+    }
+    return false;
+  }
+
+  const near = nearestMonitor();
+  const inRange = near !== null && near.dist < MONITOR_TRIGGER_RADIUS;
+
+  // Re-engage gate: must leave the radius before another auto-focus.
+  if (monitorReengageBlocked && !inRange) monitorReengageBlocked = false;
+
+  if (!monitorFocus && inRange && !monitorReengageBlocked && near.inst.monitor) {
+    engageMonitor(near.inst.monitor);
+    monitorFocus = {
+      inst: near.inst, monitor: near.inst.monitor,
+      phase: 'in', t: 0, sitTriggered: false,
+    };
+    if (petController) petController.setInputBlocked(true);
+  }
+
+  if (!monitorFocus) return false;
+
+  const comp = computeMonitorComposition(monitorFocus.monitor);
+
+  // While focusing-in, auto-path the corgi to the sit spot and rotate
+  // it to face the monitor. Input is already blocked on the controller
+  // (so it isn't fighting us); we write carRig directly.
+  if (monitorFocus.phase === 'in' || monitorFocus.phase === 'active') {
+    const lerpF = 1 - Math.exp(-dt / DOG_PATH_TAU);
+    const dx = comp.dogTarget.x - carRig.position.x;
+    const dz = comp.dogTarget.z - carRig.position.z;
+    carRig.position.x += dx * lerpF;
+    carRig.position.z += dz * lerpF;
+    // Face the monitor (yaw toward -normal, since the corgi's forward
+    // is local -Z and we want it pointed toward the screen).
+    const targetYaw = Math.atan2(-comp.normal.x, -comp.normal.z) + Math.PI;
+    let dy = targetYaw - carRig.rotation.y;
+    while (dy > Math.PI) dy -= 2 * Math.PI;
+    while (dy < -Math.PI) dy += 2 * Math.PI;
+    carRig.rotation.y += dy * lerpF;
+    // Trigger the sit-down chain once we're close enough.
+    const distRemaining = Math.hypot(dx, dz);
+    if (!monitorFocus.sitTriggered && distRemaining < DOG_SIT_DIST_THRESHOLD) {
+      monitorFocus.sitTriggered = true;
+      if (petController) petController.enterSittingMode();
+    }
+  }
+
+  if (monitorFocus.phase === 'in') {
+    monitorFocus.t = Math.min(1, monitorFocus.t + dt * MONITOR_FOCUS_T_RATE);
+    if (monitorFocus.t >= 1) {
+      monitorFocus.phase = 'active';
+      // Iframe is BEHIND the canvas (cssLayer z=-1) so the chassis
+      // alpha-hole + iframe-through-the-hole compositing keeps the
+      // iframe visually shaped to the screen mesh. To click the
+      // iframe we drop canvas pointer-events so events pass through
+      // to it. Focus the iframe so keystrokes route there.
+      if (monitorFocus.monitor.active) {
+        const ifr = monitorFocus.monitor.active.iframe;
+        ifr.style.pointerEvents = 'auto';
+        canvas!.style.pointerEvents = 'none';
+        ifr.focus();
+      }
+    }
+  } else if (monitorFocus.phase === 'out') {
+    monitorFocus.t = Math.max(0, monitorFocus.t - dt * MONITOR_FOCUS_T_RATE);
+    if (monitorFocus.t <= 0) {
+      monitorReengageBlocked = true;
+      if (petController) petController.setInputBlocked(false);
+      hideEscPrompt();
+      disengageMonitor(monitorFocus.monitor);
+      monitorFocus = null;
+      return false;
+    }
+  }
+
+  updateCameraMonitorBlend(monitorFocus, comp);
+  updateEscPrompt(monitorFocus);
+  // Fade the iframe in/out with the focus lerp. The iframe is a
+  // flat rectangle and the CRT face is curved — at intermediate
+  // camera angles the rectangle silhouette doesn't align with the
+  // chassis hole, which reads as "gross" during the transition.
+  // Hidden until ~70% of the way in, snaps to fully visible at end.
+  if (monitorFocus.monitor.active) {
+    const u = monitorFocus.t;
+    const fade = u < 0.7 ? 0 : (u - 0.7) / 0.3;
+    monitorFocus.monitor.active.css.element.style.opacity = String(fade);
+  }
+  return true;
+}
+
+// ESC handler — only triggers an exit while a focus is active. We
+// don't put this on petController's listener because petController
+// is recreated when the active car swaps; this listener owns the
+// page-level escape semantics.
+// While the monitor is focused, forward 1-5 number keys + wheel-scroll
+// to the iframe's document. The iframe is z=-1 behind the canvas, so
+// hit-testing routes clicks/scroll through it correctly when canvas
+// pointer-events is off — but if the user clicks anywhere outside the
+// iframe rect (chassis, sky, anywhere), keyboard focus moves away
+// and the iframe's own keydown listener stops firing. These window-
+// level handlers route input to the iframe regardless of focus state.
+window.addEventListener('keydown', (e) => {
+  if (!monitorFocus?.monitor.active || monitorFocus.phase !== 'active') return;
+  if (e.key < '1' || e.key > '5') return;
+  const ifr = monitorFocus.monitor.active.iframe;
+  ifr.contentDocument?.dispatchEvent(new KeyboardEvent('keydown', { key: e.key }));
+});
+window.addEventListener('wheel', (e) => {
+  if (!monitorFocus?.monitor.active || monitorFocus.phase !== 'active') return;
+  const ifr = monitorFocus.monitor.active.iframe;
+  const main = ifr.contentDocument?.querySelector('main') as HTMLElement | null;
+  if (main) {
+    main.scrollTop += e.deltaY;
+    e.preventDefault();
+  }
+}, { passive: false });
+
+// Click forwarding. Hit-testing through the CSS3D matrix3d transform
+// stack is unreliable in Chrome — even with the iframe pointer-events
+// auto + canvas pointer-events none, clicks at the iframe's visual
+// position often don't actually trigger handlers inside it. We catch
+// clicks at the window level, map screen-space coords to iframe-local
+// coords (scaled by the iframe's CSS3D-induced display ratio), and
+// fire a click on the element at that point in the iframe's document.
+window.addEventListener('click', (e) => {
+  if (!monitorFocus?.monitor.active || monitorFocus.phase !== 'active') return;
+  const ifr = monitorFocus.monitor.active.iframe;
+  const rect = ifr.getBoundingClientRect();
+  if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
+  const doc = ifr.contentDocument;
+  if (!doc) return;
+  const ifrX = ((e.clientX - rect.left) / rect.width) * ifr.offsetWidth;
+  const ifrY = ((e.clientY - rect.top) / rect.height) * ifr.offsetHeight;
+  const target = doc.elementFromPoint(ifrX, ifrY) as HTMLElement | null;
+  if (!target) return;
+  // Anchors navigate via .click(); other elements get a synthesized
+  // click event so React/vanilla handlers fire.
+  target.click?.();
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'Escape') return;
+  if (!monitorFocus || monitorFocus.phase === 'out') return;
+  monitorFocus.phase = 'out';
+  // Restore canvas clicks so OrbitControls / nav buttons / next
+  // monitor approach work again.
+  canvas!.style.pointerEvents = 'auto';
+  if (monitorFocus.monitor.active) {
+    monitorFocus.monitor.active.iframe.style.pointerEvents = 'none';
+    // Iframe focus would otherwise keep absorbing future keydowns.
+    monitorFocus.monitor.active.iframe.blur();
+  }
+  window.focus();
+  // Stand the corgi back up so it can roam off again — the camera
+  // pull-out and the SitToIdle transition play in parallel.
+  if (petController) petController.exitSittingMode();
+});
 void buildUserPlacements().catch((err) => console.error('user placements load failed', err));
 
 // ---- Smoke particles + foliage collision ----
@@ -1073,6 +1572,17 @@ interface PetController {
   speedFraction(): number;
   /** Wired by the tick loop each frame so we can drive the carRig. */
   update(dt: number): void;
+  /** When `true`, ignore keyboard input but keep the mixer + idle
+   *  scheduler running. Used while the player is focused on an
+   *  in-world monitor — the corgi shouldn't roam off while you
+   *  type into Google. */
+  setInputBlocked(blocked: boolean): void;
+  /** Force a scripted "sit down + cycle sit idles" scene, used when
+   *  the player auto-paths to a monitor. Cancels any in-flight scene. */
+  enterSittingMode(): void;
+  /** Stand back up out of the sitting scene and resume normal idle
+   *  scheduling. */
+  exitSittingMode(): void;
   dispose(): void;
 }
 let petController: PetController | null = null;
@@ -1399,6 +1909,44 @@ function createPetController(root: THREE.Object3D, loader: FBXLoader): PetContro
     posture = 'standing';
   }
 
+  /** Scripted scene: sit down, then cycle through sitting idles. Used
+   *  when the player auto-paths to a monitor and we want the corgi to
+   *  plant itself in front of the screen. */
+  function runScriptedSitChain() {
+    cancelScene();
+    scene = {
+      weight: 1, start: 'standing', end: 'sitting',
+      steps: [
+        { kind: 'once', clip: 'CorgiIdleToSit' },
+        { kind: 'loop', clip: 'CorgiSitIdle', hold: 5 },
+        { kind: 'loop', clip: 'CorgiSitScratch', hold: 4 },
+        { kind: 'loop', clip: 'CorgiSitIdle', hold: 4 },
+        { kind: 'loop', clip: 'CorgiSitIdleLong', hold: 9 },
+        // Loop back to SitIdle by re-queuing on completion. Default
+        // scene-end behaviour picks a new scene from PET_SCENES; from
+        // posture='sitting' that pulls in another sit-class scene.
+      ],
+    };
+    stepIndex = 0;
+    stepTimer = 0;
+    void startStep();
+  }
+
+  /** Stand back up out of the scripted sit. Plays SitToIdle, then
+   *  default scheduling picks up roaming-from-standing scenes. */
+  function runScriptedStandUp() {
+    cancelScene();
+    scene = {
+      weight: 1, start: 'sitting', end: 'standing',
+      steps: [
+        { kind: 'once', clip: 'CorgiSitToIdle' },
+      ],
+    };
+    stepIndex = 0;
+    stepTimer = 0;
+    void startStep();
+  }
+
   queueNextScene();
 
   // Input state — separate listener so we don't share with flightControls
@@ -1431,18 +1979,22 @@ function createPetController(root: THREE.Object3D, loader: FBXLoader): PetContro
   const PET_SPEED_TAU = 0.10;   // ~6 frames @60fps to reach target
   const PET_YAW_TAU   = 0.08;   // even snappier on direction swaps
   const PET_CROSSFADE = 0.4;
+  let inputBlocked = false;
   return {
     mixer,
     velocity,
     forwardSpeed: () => forwardSpeed,
     speedFraction: () => Math.abs(forwardSpeed) / PET_RUN_SPEED,
+    setInputBlocked(b: boolean) { inputBlocked = b; if (b) keys.clear(); },
+    enterSittingMode: runScriptedSitChain,
+    exitSittingMode: runScriptedStandUp,
     update(dt: number) {
       mixer.update(dt);
 
-      const fwd  = keys.has('KeyW') || keys.has('ArrowUp')    ? 1 : 0;
-      const back = keys.has('KeyS') || keys.has('ArrowDown')  ? 1 : 0;
-      const left = keys.has('KeyA') || keys.has('ArrowLeft')  ? 1 : 0;
-      const right = keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0;
+      const fwd  = !inputBlocked && (keys.has('KeyW') || keys.has('ArrowUp'))    ? 1 : 0;
+      const back = !inputBlocked && (keys.has('KeyS') || keys.has('ArrowDown'))  ? 1 : 0;
+      const left = !inputBlocked && (keys.has('KeyA') || keys.has('ArrowLeft'))  ? 1 : 0;
+      const right = !inputBlocked && (keys.has('KeyD') || keys.has('ArrowRight')) ? 1 : 0;
       const dx = right - left;
       const dz = back - fwd;
       const moving = dx !== 0 || dz !== 0;
@@ -2353,7 +2905,10 @@ function tick() {
       carBody.rotation.x = 0;
       carBody.rotation.y = 0;
       carBody.rotation.z = 0;
-      updateCamera(dt);
+      // Monitor focus replaces the chase camera while the corgi is
+      // close to a placed IBM 3178 — tickMonitorFocus returns true
+      // when it has taken control, so we skip the chase update.
+      if (!tickMonitorFocus(dt)) updateCamera(dt);
       updateHud();
       break play;
     }
@@ -2472,6 +3027,7 @@ function tick() {
   }
 
   renderer.render(scene, camera);
+  cssRenderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
 
@@ -2479,6 +3035,7 @@ function resize() {
   const wrap = canvas!.parentElement!;
   const w = wrap.clientWidth, h = wrap.clientHeight;
   renderer.setSize(w, h, false);
+  cssRenderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
