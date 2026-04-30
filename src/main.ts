@@ -581,12 +581,22 @@ function generateFoliagePlacements(): Map<string, FoliagePlacement[]> {
   // Half-tile size around the spawn so the car's tile + its 8 neighbors
   // stay clear — keeps the immediate spawn area readable.
   const clearR = FLOOR_TILE_SIZE * 1.5;
+  // Skip anything the user trashed in the editor. RNG steps are still
+  // consumed for tombstoned tiles so the rest of the scatter stays
+  // stable when the player deletes individual props.
+  const tombstones = loadTombstonesFromEditor();
   for (let i = 0; i < FLOOR_TILE_TOTAL; i++) {
     const { x: tx, z: tz } = tilePos(i);
     if (Math.abs(tx) <= clearR && Math.abs(tz) <= clearR) continue;
     const rng = mulberry32(i + 1);
     const def = pickFoliageType(rng);
     if (!def) continue;
+    if (tombstones.has(`${def.id}:${i}`)) {
+      // Consume the rest of this tile's RNG sequence so subsequent
+      // tiles render the same regardless of what was deleted.
+      rng(); rng(); rng(); rng();
+      continue;
+    }
     const offsetX = (rng() - 0.5) * (FLOOR_TILE_SIZE * 0.55);
     const offsetZ = (rng() - 0.5) * (FLOOR_TILE_SIZE * 0.55);
     const scale   = 0.85 + rng() * 0.3;
@@ -664,6 +674,7 @@ import {
   PLACEABLES as PLACEABLE_DEFS,
   loadPlaceable as loadPlaceableAsset,
   loadStoredPlacements,
+  loadTombstones as loadTombstonesFromEditor,
   Placement as UserPlacement,
 } from './shared/placeables';
 
@@ -696,8 +707,14 @@ async function buildUserPlacements(): Promise<void> {
     obj.traverse((node) => {
       if ((node as THREE.Mesh).isMesh) (node as THREE.Mesh).castShadow = true;
     });
-    const box = new THREE.Box3().setFromObject(obj);
-    const groundOffsetY = -box.min.y;
+    let groundOffsetY: number;
+    if (def.snapToGrid) {
+      // Roads carry their own Y lift internally; preserve it.
+      groundOffsetY = obj.position.y;
+    } else {
+      const box = new THREE.Box3().setFromObject(obj);
+      groundOffsetY = -box.min.y;
+    }
     obj.position.set(p.x, -INTRO_DROP, p.z);
     scene.add(obj);
     userPlaced.push({ obj, tileIdx: userTileIdxFor(p.x, p.z), groundOffsetY });

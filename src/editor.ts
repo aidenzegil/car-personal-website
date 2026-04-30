@@ -15,13 +15,21 @@
 // edit the user has made.
 
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
   PLACEABLES, PlaceableDef, Placement, findPlaceable, loadPlaceable,
   loadStoredPlacements, saveStoredPlacements,
+  loadTombstones, saveTombstones, tombstoneKey,
 } from './shared/placeables';
+import {
+  applyFloorTileShader,
+  generateFoliageScatter,
+  findFoliageDef,
+} from './shared/world';
 
-const CATEGORY_ORDER = ['aircraft', 'electronics', 'tree', 'foliage', 'flower', 'mushroom', 'rock', 'prop'] as const;
+const CATEGORY_ORDER = ['road', 'aircraft', 'electronics', 'tree', 'foliage', 'flower', 'mushroom', 'rock', 'prop'] as const;
 const CATEGORY_TITLE: Record<PlaceableDef['category'], string> = {
+  road: 'Roads',
   aircraft: 'Aircraft',
   electronics: 'Electronics',
   tree: 'Trees',
@@ -110,6 +118,17 @@ const camOffset = new THREE.Vector3(18, 22, 24);
 camera.position.set(camOffset.x, camOffset.y, camOffset.z);
 camera.lookAt(0, 0.6, 0);
 
+// OrbitControls — drag to rotate, right-drag to pan, scroll to zoom.
+// Limited so the user can't tip below the deck or fly into orbit.
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0.6, 0);
+controls.minDistance = 6;
+controls.maxDistance = 200;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.screenSpacePanning = false;
+
 // ---- Floor tiles ----
 
 const FLOOR_TILE_SIZE = 12;
@@ -148,7 +167,13 @@ const floorTileMat = new THREE.MeshStandardMaterial({
   color: 0xffffff, vertexColors: true, metalness: 0.05, roughness: 0.95,
   emissive: new THREE.Color(0x111315), emissiveIntensity: 0.4,
 });
-applyVerticalVoid(floorTileMat);
+applyFloorTileShader(floorTileMat, {
+  tileSize: FLOOR_TILE_SIZE,
+  tileHeight: FLOOR_TILE_HEIGHT,
+  voidPlaneY: VOID_PLANE_Y,
+  voidColor: VOID_COLOR,
+  voidDensity: VOID_DENSITY,
+});
 const floorTiles = new THREE.InstancedMesh(floorTileGeom, floorTileMat, FLOOR_TILE_TOTAL);
 floorTiles.receiveShadow = true;
 {
@@ -288,9 +313,21 @@ async function spawnPlacement(p: Placement): Promise<PlacedInstance | null> {
   obj.traverse((node) => {
     if ((node as THREE.Mesh).isMesh) (node as THREE.Mesh).castShadow = true;
   });
-  const box = new THREE.Box3().setFromObject(obj);
-  const groundOffsetY = -box.min.y;
-  obj.position.set(p.x, groundOffsetY, p.z);
+  // Roads (and other chunk-locked pieces) come pre-positioned with
+  // their own Y lift so they sit flush on the deck — preserve that
+  // builder Y instead of overwriting via .set, which would put the
+  // asphalt at y=0 and z-fight the tile tops. Other assets use the
+  // bbox-min auto-ground.
+  let groundOffsetY: number;
+  if (def.snapToGrid) {
+    groundOffsetY = obj.position.y;
+    obj.position.x = p.x;
+    obj.position.z = p.z;
+  } else {
+    const box = new THREE.Box3().setFromObject(obj);
+    groundOffsetY = -box.min.y;
+    obj.position.set(p.x, groundOffsetY, p.z);
+  }
   // Stamp the assetId on the object so trash-mode raycasts can map
   // a click target back to its placement record.
   obj.userData.placementId = p.assetId;
@@ -312,6 +349,76 @@ async function bootPlacements() {
   }
 }
 void bootPlacements();
+
+// ---- Procedural foliage scatter (read-only, mirrors home page) ----
+//
+// Rendered as static InstancedMesh per prop type — these are NOT
+// removable via the trashcan. Their purpose is to give the user a
+// reference for where existing trees/bushes/rocks live so they can
+// place new things relative to them.
+// Live scatter registry — one entry per rendered InstancedMesh, keyed
+// to the scatter placements so trash-mode raycast can resolve a click
+// back to a `defId:tileIdx` tombstone key.
+interface ScatterGroup {
+  mesh: THREE.InstancedMesh;
+  defId: string;
+  /** placements[i] corresponds to the InstancedMesh's instance i. */
+  placements: { tileIdx: number }[];
+}
+const scatterGroups: ScatterGroup[] = [];
+const _zeroMtx = new THREE.Matrix4().compose(new THREE.Vector3(), new THREE.Quaternion(), new THREE.Vector3());
+
+async function buildScatter() {
+  const map = generateFoliageScatter({
+    tileCount: FLOOR_TILE_COUNT,
+    tileSize: FLOOR_TILE_SIZE,
+    worldScale: 1,
+  });
+  const _mtx = new THREE.Matrix4();
+  const _vec = new THREE.Vector3();
+  const _quat = new THREE.Quaternion();
+  const _euler = new THREE.Euler();
+  const _scl = new THREE.Vector3();
+  await Promise.all([...map.entries()].map(async ([defId, list]) => {
+    if (list.length === 0) return;
+    const fdef = findFoliageDef(defId);
+    if (!fdef) return;
+    // Reuse the placeable loader (same OBJ, palette texture). Then
+    // turn the loaded object into one InstancedMesh per prop.
+    const placeable = findPlaceable(defId);
+    if (!placeable) return;
+    const proto = await loadPlaceable(placeable);
+    let firstMesh: THREE.Mesh | null = null;
+    proto.traverse((node) => { if (!firstMesh && (node as any).isMesh) firstMesh = node as THREE.Mesh; });
+    if (!firstMesh) return;
+    const mNode: THREE.Mesh = firstMesh;
+    // proto is already scaled so its max dim ≈ placeable.targetSize.
+    // Override that to use FOLIAGE_DEFS targetSize so scatter sizes
+    // match the home page exactly.
+    const baseBox = new THREE.Box3().setFromBufferAttribute(mNode.geometry.attributes.position as THREE.BufferAttribute);
+    const baseSize = baseBox.getSize(new THREE.Vector3());
+    const baseMaxDim = Math.max(baseSize.x, baseSize.y, baseSize.z);
+    const baseScale = baseMaxDim > 0 ? fdef.targetSize / baseMaxDim : 1;
+    const groundOffsetY = -baseBox.min.y * baseScale;
+    // Build the InstancedMesh.
+    const inst = new THREE.InstancedMesh(mNode.geometry, mNode.material as THREE.Material, list.length);
+    inst.castShadow = true;
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i]!;
+      _euler.set(0, p.rotY, 0);
+      _quat.setFromEuler(_euler);
+      _scl.setScalar(baseScale * p.scale);
+      _vec.set(p.worldX, groundOffsetY, p.worldZ);
+      _mtx.compose(_vec, _quat, _scl);
+      inst.setMatrixAt(i, _mtx);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    inst.frustumCulled = false;
+    scene.add(inst);
+    scatterGroups.push({ mesh: inst, defId, placements: list.map((p) => ({ tileIdx: p.tileIdx })) });
+  }));
+}
+void buildScatter();
 
 // ---- Sidebar ----
 
@@ -361,7 +468,15 @@ interface PlacementSession {
   naturalScale: number;
   scale: number;
   rotY: number;
+  /** Set when the session was opened by clicking an EXISTING asset
+   *  ("move" mode). On commit we discard the original; on cancel we
+   *  restore it so the world stays consistent if the user backs out. */
+  movingFrom?: MoveSource;
 }
+
+type MoveSource =
+  | { kind: 'user'; instanceIdx: number; placement: Placement; obj: THREE.Object3D }
+  | { kind: 'scatter'; group: ScatterGroup; instanceId: number; matrix: THREE.Matrix4; tombstone: string };
 let session: PlacementSession | null = null;
 let trashMode = false;
 
@@ -390,7 +505,20 @@ canvas.addEventListener('mousemove', (e) => {
   }
 });
 
-async function startPlacement(assetId: string) {
+/** Clone a material so we can mutate transparency/opacity on the
+ *  ghost without affecting the shared (sometimes module-scope) source. */
+function makeGhostMaterial(orig: THREE.Material): THREE.Material {
+  const clone = orig.clone();
+  if ('transparent' in clone) (clone as any).transparent = true;
+  if ('opacity' in clone) (clone as any).opacity = 0.55;
+  if ('depthWrite' in clone) (clone as any).depthWrite = false;
+  return clone;
+}
+
+async function startPlacement(
+  assetId: string,
+  opts: { initialScale?: number; initialRotY?: number; movingFrom?: MoveSource } = {},
+) {
   const def = findPlaceable(assetId);
   if (!def) return;
   cancelPlacement();
@@ -398,31 +526,50 @@ async function startPlacement(assetId: string) {
   const ghost = await loadPlaceable(def);
   applyVoidToTree(ghost);
   // Make the ghost translucent so the user sees the eventual size +
-  // orientation without it looking solid.
+  // orientation without it looking solid. Clone materials first —
+  // procedural assets like roads share module-scope material
+  // singletons, and mutating them in place would leave every spawned
+  // copy translucent forever.
   ghost.traverse((node) => {
     const mesh = node as THREE.Mesh;
     if (!(mesh as any).isMesh) return;
-    const m = mesh.material as THREE.MeshStandardMaterial;
-    if (m && 'transparent' in m) {
-      m.transparent = true;
-      m.opacity = 0.55;
-      m.depthWrite = false;
+    const orig = mesh.material;
+    if (Array.isArray(orig)) {
+      mesh.material = orig.map((m) => makeGhostMaterial(m));
+    } else if (orig) {
+      mesh.material = makeGhostMaterial(orig);
     }
   });
-  const box = new THREE.Box3().setFromObject(ghost);
-  void box;
-  const naturalScale = ghost.scale.x; // loadPlaceable applies a uniform multiplier
+  const naturalScale = ghost.scale.x;
   ghost.position.set(0, 0, 0);
   scene.add(ghost);
-  session = { def, ghost, naturalScale, scale: 1, rotY: 0 };
+  session = {
+    def, ghost, naturalScale,
+    scale: opts.initialScale ?? 1,
+    rotY: opts.initialRotY ?? 0,
+    movingFrom: opts.movingFrom,
+  };
   applyGhostTransform();
-  setMode(`Placing <strong>${def.label}</strong>. Click to drop, Esc to cancel.`);
+  setMode(opts.movingFrom
+    ? `Moving <strong>${def.label}</strong>. Click to drop, Esc to cancel.`
+    : `Placing <strong>${def.label}</strong>. Click to drop, Esc to cancel.`);
   sidebar.querySelectorAll('.lib-row').forEach((r) => r.classList.remove('active'));
   sidebar.querySelector(`.lib-row[data-id="${assetId}"]`)?.classList.add('active');
 }
 
 function cancelPlacement() {
   if (!session) return;
+  // Restore moved-from origin if this was a move session — the
+  // original was hidden but not deleted, so cancel just unhides.
+  if (session.movingFrom) {
+    const src = session.movingFrom;
+    if (src.kind === 'user') {
+      src.obj.visible = true;
+    } else {
+      src.group.mesh.setMatrixAt(src.instanceId, src.matrix);
+      src.group.mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
   scene.remove(session.ghost);
   session.ghost.traverse((node) => {
     const m = (node as THREE.Mesh).geometry;
@@ -432,20 +579,45 @@ function cancelPlacement() {
     else mat?.dispose?.();
   });
   session = null;
-  setMode('<strong>Idle.</strong> Click an asset to start placing.');
+  setMode('<strong>Idle.</strong> Click an asset to place, or click an existing one to move it.');
   sidebar.querySelectorAll('.lib-row.active').forEach((r) => r.classList.remove('active'));
 }
 
 async function commitPlacement() {
   if (!session) return;
+  // Snap to tile centers when this is a chunk-locked piece so the
+  // committed placement matches the ghost preview the user saw.
+  let cx = cursor.x;
+  let cz = cursor.z;
+  if (session.def.snapToGrid) {
+    cx = Math.round(cx / TILE_SIZE_LOCAL) * TILE_SIZE_LOCAL;
+    cz = Math.round(cz / TILE_SIZE_LOCAL) * TILE_SIZE_LOCAL;
+  }
   const placement: Placement = {
     assetId: session.def.id,
-    x: cursor.x,
-    z: cursor.z,
+    x: cx,
+    z: cz,
     scale: session.scale,
     rotY: session.rotY,
   };
-  // Discard the ghost; spawn a fresh non-translucent instance.
+  // If this was a "move" session, finalize the original's removal:
+  //   - user placement: drop it from placedInstances + scene
+  //   - scatter instance: tombstone it (the matrix is already zero'd)
+  const src = session.movingFrom;
+  if (src) {
+    if (src.kind === 'user') {
+      const idx = placedInstances.findIndex((i) => i === placedInstances[src.instanceIdx] || i.object === src.obj);
+      const real = idx >= 0 ? idx : placedInstances.findIndex((i) => i.object === src.obj);
+      if (real >= 0) {
+        scene.remove(placedInstances[real]!.object);
+        placedInstances.splice(real, 1);
+      }
+    } else {
+      const tombstones = loadTombstones();
+      tombstones.add(src.tombstone);
+      saveTombstones(tombstones);
+    }
+  }
   scene.remove(session.ghost);
   const def = session.def;
   session = null;
@@ -459,17 +631,20 @@ async function commitPlacement() {
 }
 
 canvas.addEventListener('click', (e) => {
-  // Trash mode: try to remove a placed asset under the cursor.
+  // Trash mode: try to remove an asset under the cursor — either a
+  // user placement OR a procedural scatter instance (which gets
+  // tombstoned so it stays gone across reloads).
   if (trashMode) {
     const rect = canvas.getBoundingClientRect();
     _mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     _mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     _ray.setFromCamera(_mouseNDC, camera);
-    const targets = placedInstances.map((i) => i.object);
-    const hits = _ray.intersectObjects(targets, true);
-    if (hits.length > 0) {
-      // Walk up to find the placed root object.
-      let node: THREE.Object3D | null = hits[0]!.object;
+
+    // 1. User placements first — they're "on top" semantically.
+    const userTargets = placedInstances.map((i) => i.object);
+    const userHits = _ray.intersectObjects(userTargets, true);
+    if (userHits.length > 0) {
+      let node: THREE.Object3D | null = userHits[0]!.object;
       while (node && !node.userData.placement) node = node.parent;
       if (node) {
         const idx = placedInstances.findIndex((i) => i.object === node);
@@ -478,13 +653,95 @@ canvas.addEventListener('click', (e) => {
           placedInstances.splice(idx, 1);
           persist();
           setMode('Removed. Click another asset to delete, or toggle 🗑 off.');
+          return;
+        }
+      }
+    }
+
+    // 2. Procedural scatter — InstancedMesh raycast returns instanceId.
+    const scatterMeshes = scatterGroups.map((g) => g.mesh);
+    const scatterHits = _ray.intersectObjects(scatterMeshes, false);
+    if (scatterHits.length > 0) {
+      const hit = scatterHits[0]!;
+      const grp = scatterGroups.find((g) => g.mesh === hit.object);
+      if (grp && hit.instanceId !== undefined) {
+        const placement = grp.placements[hit.instanceId];
+        if (placement) {
+          const tombstones = loadTombstones();
+          tombstones.add(tombstoneKey(grp.defId, placement.tileIdx));
+          saveTombstones(tombstones);
+          // Hide the deleted instance immediately by zeroing its matrix.
+          grp.mesh.setMatrixAt(hit.instanceId, _zeroMtx);
+          grp.mesh.instanceMatrix.needsUpdate = true;
+          setMode('Removed. Click another asset to delete, or toggle 🗑 off.');
+          return;
         }
       }
     }
     return;
   }
 
-  if (session && cursor.valid) void commitPlacement();
+  if (session && cursor.valid) {
+    void commitPlacement();
+    return;
+  }
+
+  // Idle click: try to pick up an existing asset for "move" mode.
+  // User placements first (they're in front semantically); then
+  // procedural scatter. The original is hidden during the session
+  // so cancel can restore it.
+  const rect = canvas.getBoundingClientRect();
+  _mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  _mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  _ray.setFromCamera(_mouseNDC, camera);
+
+  const userTargets = placedInstances.map((i) => i.object);
+  const userHits = _ray.intersectObjects(userTargets, true);
+  if (userHits.length > 0) {
+    let node: THREE.Object3D | null = userHits[0]!.object;
+    while (node && !node.userData.placement) node = node.parent;
+    if (node) {
+      const idx = placedInstances.findIndex((i) => i.object === node);
+      if (idx >= 0) {
+        const inst = placedInstances[idx]!;
+        const p = inst.placement;
+        inst.object.visible = false;
+        void startPlacement(p.assetId, {
+          initialScale: p.scale,
+          initialRotY: p.rotY,
+          movingFrom: { kind: 'user', instanceIdx: idx, placement: p, obj: inst.object },
+        });
+        return;
+      }
+    }
+  }
+
+  const scatterMeshes = scatterGroups.map((g) => g.mesh);
+  const scatterHits = _ray.intersectObjects(scatterMeshes, false);
+  if (scatterHits.length > 0) {
+    const hit = scatterHits[0]!;
+    const grp = scatterGroups.find((g) => g.mesh === hit.object);
+    if (grp && hit.instanceId !== undefined) {
+      const placement = grp.placements[hit.instanceId];
+      if (placement) {
+        const savedMtx = new THREE.Matrix4();
+        grp.mesh.getMatrixAt(hit.instanceId, savedMtx);
+        // Hide the instance; cancel restores it from `savedMtx`.
+        grp.mesh.setMatrixAt(hit.instanceId, _zeroMtx);
+        grp.mesh.instanceMatrix.needsUpdate = true;
+        void startPlacement(grp.defId, {
+          movingFrom: {
+            kind: 'scatter',
+            group: grp,
+            instanceId: hit.instanceId,
+            matrix: savedMtx,
+            tombstone: tombstoneKey(grp.defId, placement.tileIdx),
+          },
+        });
+        return;
+      }
+    }
+  }
 });
 
 window.addEventListener('keydown', (e) => {
@@ -518,23 +775,42 @@ window.addEventListener('blur',    () => keys.clear());
 function tickPlacement(dt: number) {
   if (!session) return;
   session.ghost.visible = cursor.valid;
-  if (keys.has('KeyW')) session.scale = Math.min(SCALE_MAX, session.scale * Math.pow(SCALE_RATE, dt));
-  if (keys.has('KeyS')) session.scale = Math.max(SCALE_MIN, session.scale * Math.pow(1 / SCALE_RATE, dt));
-  if (keys.has('KeyA')) session.rotY += ROT_RATE * dt;
-  if (keys.has('KeyD')) session.rotY -= ROT_RATE * dt;
+  // Roads are chunk-locked: ignore scale + rotate by 90° on each
+  // discrete A/D press, not continuously.
+  if (session.def.snapToGrid) {
+    if (keys.has('KeyA') && !lastFrameKeys.has('KeyA')) session.rotY += Math.PI / 2;
+    if (keys.has('KeyD') && !lastFrameKeys.has('KeyD')) session.rotY -= Math.PI / 2;
+  } else {
+    if (keys.has('KeyW')) session.scale = Math.min(SCALE_MAX, session.scale * Math.pow(SCALE_RATE, dt));
+    if (keys.has('KeyS')) session.scale = Math.max(SCALE_MIN, session.scale * Math.pow(1 / SCALE_RATE, dt));
+    if (keys.has('KeyA')) session.rotY += ROT_RATE * dt;
+    if (keys.has('KeyD')) session.rotY -= ROT_RATE * dt;
+  }
+  lastFrameKeys.clear();
+  for (const k of keys) lastFrameKeys.add(k);
   applyGhostTransform();
 }
+const lastFrameKeys = new Set<string>();
 const _ghostBox = new THREE.Box3();
+const TILE_SIZE_LOCAL = 12;
 function applyGhostTransform() {
   if (!session) return;
   session.ghost.scale.setScalar(session.naturalScale * session.scale);
   session.ghost.rotation.y = session.rotY;
-  // Recompute groundOffset so the asset's bbox bottom hits y=0
-  // regardless of current scale.
-  _ghostBox.setFromObject(session.ghost);
-  const offset = -_ghostBox.min.y;
   if (cursor.valid) {
-    session.ghost.position.set(cursor.x, offset, cursor.z);
+    let x = cursor.x;
+    let z = cursor.z;
+    if (session.def.snapToGrid) {
+      x = Math.round(x / TILE_SIZE_LOCAL) * TILE_SIZE_LOCAL;
+      z = Math.round(z / TILE_SIZE_LOCAL) * TILE_SIZE_LOCAL;
+      // Preserve the builder's internal Y lift (e.g. ROAD_LIFT) so
+      // the asphalt doesn't z-fight the floor tile tops.
+      session.ghost.position.x = x;
+      session.ghost.position.z = z;
+    } else {
+      _ghostBox.setFromObject(session.ghost);
+      session.ghost.position.set(x, -_ghostBox.min.y, z);
+    }
   }
 }
 
@@ -546,6 +822,7 @@ function tick() {
   const t = clock.getElapsedTime();
   tickIntro(t);
   tickPlacement(dt);
+  controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
