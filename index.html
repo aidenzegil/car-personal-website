@@ -37,6 +37,20 @@
       a { color: var(--cyan); text-decoration: none; }
       a:hover { text-decoration: underline; text-decoration-color: var(--cyan); }
 
+      /* When the user clicks "← home" on the library page we set
+         sessionStorage('nav-from', 'library'). On boot below we add
+         body.nav-back-from-library so this animation runs once — the
+         home viewport slides in from the left to mirror the library's
+         slide-out-to-left. The column intro wave plays simultaneously. */
+      @keyframes home-slide-in-left {
+        from { transform: translateX(-100vw); opacity: 0.4; }
+        to   { transform: translateX(0);      opacity: 1; }
+      }
+      body.nav-back-from-library {
+        animation: home-slide-in-left 0.5s cubic-bezier(0.18, 0.84, 0.24, 1);
+        will-change: transform, opacity;
+      }
+
       /* Full-bleed canvas. */
       #stage { position: fixed; inset: 0; }
       #hero-canvas { display: block; width: 100%; height: 100%; }

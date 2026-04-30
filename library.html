@@ -7,7 +7,28 @@
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #060912; color: #e5e7eb;
         font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
-      #app { display: grid; grid-template-columns: 1fr 320px; height: 100vh; }
+      /* Slide-in from the right on every load — the home page uses a column
+         teardown wave to exit, this is the library's matching entry. */
+      @keyframes lib-slide-in {
+        from { transform: translateX(100vw); opacity: 0.4; }
+        to   { transform: translateX(0);     opacity: 1; }
+      }
+      #app {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        height: 100vh;
+        animation: lib-slide-in 0.5s cubic-bezier(0.18, 0.84, 0.24, 1);
+        will-change: transform, opacity;
+      }
+      /* Applied by library.ts when the user clicks "← home" — slides the
+         library off to the RIGHT (back direction). The home page's
+         entry then slides in from the left, so the user sees one
+         continuous rightward sweep instead of two opposing motions. */
+      #app.is-leaving {
+        transform: translateX(100vw);
+        opacity: 0;
+        transition: transform 0.35s cubic-bezier(0.4, 0.0, 1, 1), opacity 0.3s ease-in;
+      }
       #canvas-wrap { position: relative; }
       #lib-canvas { display: block; width: 100%; height: 100%; }
 
@@ -61,6 +82,45 @@
       }
       #info-panel h3 { margin: 0 0 4px; font-size: 14px; color: #fff; }
       #info-panel .info-meta { color: rgba(255, 255, 255, 0.4); font-size: 11px; }
+
+      /* Animation picker: appears for assets that ship with multiple
+         clips (corgi, etc.). Empty list → block hidden via .hidden. */
+      #anim-picker {
+        margin-top: 10px;
+        max-height: 168px;
+        overflow-y: auto;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      #anim-picker.hidden { display: none; }
+      #anim-picker::-webkit-scrollbar { width: 6px; }
+      #anim-picker::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+      .anim-chip {
+        display: inline-block;
+        padding: 3px 8px;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 4px;
+        color: rgba(255, 255, 255, 0.7);
+        background: rgba(255, 255, 255, 0.03);
+        cursor: pointer;
+        transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+      }
+      .anim-chip:hover {
+        border-color: #93c5fd;
+        color: #93c5fd;
+      }
+      .anim-chip.active {
+        border-color: rgba(255, 255, 255, 0.6);
+        color: #fff;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .anim-chip.loading {
+        opacity: 0.5;
+        cursor: wait;
+      }
     </style>
   </head>
   <body>
@@ -74,6 +134,7 @@
           <h3 id="info-name">—</h3>
           <div class="info-meta" id="info-source">—</div>
           <div id="info-notes" style="margin-top: 6px;"></div>
+          <div id="anim-picker" class="hidden"></div>
         </div>
       </div>
       <aside id="sidebar"></aside>
