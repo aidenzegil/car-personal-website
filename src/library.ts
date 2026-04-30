@@ -51,7 +51,7 @@ const WHEEL_STRATEGIES: Record<string, WheelStrategy> = {
 };
 
 type AssetCategory =
-  | 'vehicle' | 'aircraft' | 'character'
+  | 'vehicle' | 'aircraft' | 'character' | 'electronics'
   | 'tree' | 'foliage' | 'flower' | 'mushroom' | 'rock' | 'prop';
 
 interface AssetEntry {
@@ -70,13 +70,14 @@ interface AssetEntry {
 // roughly canopy → ground order so a reader skimming the list reads
 // big things at the top, ground-level props at the bottom.
 const CATEGORY_ORDER: AssetCategory[] = [
-  'vehicle', 'aircraft', 'character',
+  'vehicle', 'aircraft', 'character', 'electronics',
   'tree', 'foliage', 'flower', 'mushroom', 'rock', 'prop',
 ];
 const CATEGORY_TITLE: Record<AssetCategory, string> = {
   vehicle: 'Vehicles',
   aircraft: 'Aircraft',
   character: 'Characters',
+  electronics: 'Electronics',
   tree: 'Trees',
   foliage: 'Foliage',
   flower: 'Flowers',
@@ -243,6 +244,20 @@ const ASSETS: AssetEntry[] = [
         groupName: 'plane',
         hover: true,
       });
+    },
+  },
+  // ---- Electronics ----
+  {
+    category: 'electronics',
+    name: 'IBM 3178 Terminal',
+    source: '/models/electronics/ibm_3178.glb',
+    dot: '#a3a3a3',
+    notes: "Vintage IBM 3178 keyboard terminal (~1984). Sketchfab model by maxdragonn, CC-BY-4.0. Static GLB; materials are baked, no animations.",
+    async build() {
+      const gltf = await glbLoader.loadAsync('/models/electronics/ibm_3178.glb');
+      const root = gltf.scene;
+      root.name = 'ibm-3178';
+      return root;
     },
   },
   // ---- Characters ----
