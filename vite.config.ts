@@ -9,6 +9,7 @@ export default defineConfig({
       input: {
         main:    resolve(__dirname, 'index.html'),
         library: resolve(__dirname, 'library.html'),
+        editor:  resolve(__dirname, 'editor.html'),
       },
     },
   },

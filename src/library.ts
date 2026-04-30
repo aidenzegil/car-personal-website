@@ -361,18 +361,18 @@ function natureEntries(): AssetEntry[] {
 // entry — there's no need for a separate home-side animation.
 {
   const app = document.getElementById('app');
-  document.querySelectorAll<HTMLAnchorElement>('#title-bar a[href="/"]').forEach((link) => {
+  document.querySelectorAll<HTMLAnchorElement>('#title-bar a').forEach((link) => {
     link.addEventListener('click', (e) => {
       if (!app) return;
+      const href = link.getAttribute('href');
+      if (!href) return;
       e.preventDefault();
-      const href = link.getAttribute('href') ?? '/';
-      // Tell the home page to play a slide-in-from-left on load (mirror
-      // of this slide-out-to-left). Cleared by the home page after use.
+      // Tell the destination page where the user is coming from so it
+      // can play a matching slide-in animation.
       try { sessionStorage.setItem('nav-from', 'library'); } catch { /* ignore */ }
       app.classList.add('is-leaving');
       const go = () => { window.location.href = href; };
       app.addEventListener('transitionend', go, { once: true });
-      // Safety net in case transitionend doesn't fire (off-screen nav, etc.).
       setTimeout(go, 450);
     });
   });

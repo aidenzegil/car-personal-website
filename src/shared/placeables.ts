@@ -1,0 +1,144 @@
+// Shared placeables registry used by both the world editor and the
+// home page. The editor lets the user drop these assets into the
+// world; the home page reads the persisted list from localStorage
+// and spawns them during the intro wave so the world the player
+// drives through reflects every edit they've made.
+
+import * as THREE from 'three';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+export const EDITOR_KEY = 'editor-placements';
+
+export interface Placement {
+  /** Stable id for the asset definition. */
+  assetId: string;
+  /** World position (Y derived per-load from the asset's bbox.min). */
+  x: number;
+  z: number;
+  /** Multiplier on the asset's natural target size. */
+  scale: number;
+  /** Rotation around world Y. */
+  rotY: number;
+}
+
+export type PlaceableCategory =
+  | 'tree' | 'foliage' | 'flower' | 'mushroom' | 'rock' | 'prop'
+  | 'electronics' | 'aircraft';
+
+export interface PlaceableDef {
+  id: string;
+  category: PlaceableCategory;
+  label: string;
+  dot: string;
+  /** Natural max-dimension in world units when placed at scale = 1. */
+  targetSize: number;
+  source: string;
+}
+
+export const PLACEABLES: PlaceableDef[] = [
+  // Trees
+  { id: 'Tree1_Green', category: 'tree', label: 'Tree, Spruce A', dot: '#86efac', targetSize: 11, source: '/models/nature/Tree1_Green.obj' },
+  { id: 'Tree2_Green', category: 'tree', label: 'Tree, Spruce B', dot: '#86efac', targetSize: 12, source: '/models/nature/Tree2_Green.obj' },
+  { id: 'Tree3',       category: 'tree', label: 'Tree, Round',    dot: '#86efac', targetSize: 9,  source: '/models/nature/Tree3.obj' },
+  { id: 'Tree4_Green', category: 'tree', label: 'Tree, Bushy A',  dot: '#86efac', targetSize: 8,  source: '/models/nature/Tree4_Green.obj' },
+  { id: 'Tree5_Green', category: 'tree', label: 'Tree, Bushy B',  dot: '#86efac', targetSize: 8,  source: '/models/nature/Tree5_Green.obj' },
+  { id: 'Tree6_Green', category: 'tree', label: 'Tree, Bushy C',  dot: '#86efac', targetSize: 10, source: '/models/nature/Tree6_Green.obj' },
+  // Foliage
+  { id: 'CircularBush_Green', category: 'foliage', label: 'Bush, Round',  dot: '#a3e635', targetSize: 2.4, source: '/models/nature/CircularBush_Green.obj' },
+  { id: 'CubyBush_Green',     category: 'foliage', label: 'Bush, Cuboid', dot: '#a3e635', targetSize: 2.2, source: '/models/nature/CubyBush_Green.obj' },
+  { id: 'Reed',               category: 'foliage', label: 'Reeds',        dot: '#84cc16', targetSize: 2.0, source: '/models/nature/Reed.obj' },
+  // Flowers
+  { id: 'Flower1', category: 'flower', label: 'Flower 1', dot: '#fb7185', targetSize: 0.8, source: '/models/nature/Flower1.obj' },
+  { id: 'Flower2', category: 'flower', label: 'Flower 2', dot: '#fbbf24', targetSize: 0.8, source: '/models/nature/Flower2.obj' },
+  { id: 'Flower3', category: 'flower', label: 'Flower 3', dot: '#a78bfa', targetSize: 0.7, source: '/models/nature/Flower3.obj' },
+  { id: 'Flower4', category: 'flower', label: 'Flower 4', dot: '#22d3ee', targetSize: 0.7, source: '/models/nature/Flower4.obj' },
+  { id: 'Flower5', category: 'flower', label: 'Flower 5', dot: '#f472b6', targetSize: 0.8, source: '/models/nature/Flower5.obj' },
+  // Mushrooms
+  { id: 'Mushroom1', category: 'mushroom', label: 'Mushroom A', dot: '#f87171', targetSize: 1.3, source: '/models/nature/Mushroom1.obj' },
+  { id: 'Mushroom2', category: 'mushroom', label: 'Mushroom B', dot: '#f87171', targetSize: 1.0, source: '/models/nature/Mushroom2.obj' },
+  // Rocks
+  { id: 'Rock1', category: 'rock', label: 'Rock A', dot: '#9ca3af', targetSize: 2.5, source: '/models/nature/Rock1.obj' },
+  { id: 'Rock2', category: 'rock', label: 'Rock B', dot: '#9ca3af', targetSize: 2.0, source: '/models/nature/Rock2.obj' },
+  { id: 'Rock3', category: 'rock', label: 'Rock C', dot: '#9ca3af', targetSize: 1.8, source: '/models/nature/Rock3.obj' },
+  { id: 'Rock4', category: 'rock', label: 'Rock D', dot: '#9ca3af', targetSize: 1.5, source: '/models/nature/Rock4.obj' },
+  // Misc props
+  { id: 'Worm',    category: 'prop', label: 'Worm',    dot: '#fb923c', targetSize: 1.0, source: '/models/nature/Worm.obj' },
+  { id: 'Lilypad', category: 'prop', label: 'Lilypad', dot: '#34d399', targetSize: 1.2, source: '/models/nature/Lilypad.obj' },
+  { id: 'Log1',    category: 'prop', label: 'Log A',   dot: '#a16207', targetSize: 2.0, source: '/models/nature/Log1.obj' },
+  { id: 'Log2',    category: 'prop', label: 'Log B',   dot: '#a16207', targetSize: 2.5, source: '/models/nature/Log2.obj' },
+  // Electronics
+  { id: 'IBM_3178', category: 'electronics', label: 'IBM 3178', dot: '#a3a3a3', targetSize: 4, source: '/models/electronics/ibm_3178.glb' },
+  // Aircraft
+  { id: 'Plane', category: 'aircraft', label: 'Plane', dot: '#a78bfa', targetSize: 4, source: '/models/aircraft/plane.glb' },
+];
+
+export function findPlaceable(id: string): PlaceableDef | undefined {
+  return PLACEABLES.find((p) => p.id === id);
+}
+
+const fbxLoader = new FBXLoader();
+const objLoader = new OBJLoader();
+const glbLoader = new GLTFLoader();
+
+let _naturePalette: THREE.Texture | null = null;
+function getNaturePalette(): THREE.Texture {
+  if (_naturePalette) return _naturePalette;
+  const t = new THREE.TextureLoader().load('/models/nature/TexturePalette.png');
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  _naturePalette = t;
+  return t;
+}
+
+/** Load an asset by definition. Returns an Object3D with scale set so
+ *  its largest natural dimension equals def.targetSize. The caller can
+ *  then multiply by a per-instance scale factor and set position/rotation. */
+export async function loadPlaceable(def: PlaceableDef): Promise<THREE.Object3D> {
+  const ext = def.source.split('.').pop()!.toLowerCase();
+  let raw: THREE.Object3D;
+  if (ext === 'obj') {
+    raw = await objLoader.loadAsync(def.source);
+  } else if (ext === 'glb' || ext === 'gltf') {
+    const gltf = await glbLoader.loadAsync(def.source);
+    raw = gltf.scene;
+  } else if (ext === 'fbx') {
+    raw = await fbxLoader.loadAsync(def.source);
+  } else {
+    throw new Error(`unknown extension for ${def.source}`);
+  }
+  // OBJ-loaded nature props ship with a generic gray .mtl; the
+  // painted color lives in the shared TexturePalette UV sheet.
+  if (ext === 'obj') {
+    const palette = getNaturePalette();
+    raw.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!(mesh as any).isMesh) return;
+      mesh.material = new THREE.MeshStandardMaterial({
+        map: palette, roughness: 0.85, metalness: 0.05,
+      });
+    });
+  }
+  const box = new THREE.Box3().setFromObject(raw);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  if (maxDim > 0) raw.scale.multiplyScalar(def.targetSize / maxDim);
+  return raw;
+}
+
+export function loadStoredPlacements(): Placement[] {
+  try {
+    const raw = localStorage.getItem(EDITOR_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((p) => p && typeof p.assetId === 'string');
+  } catch { return []; }
+}
+export function saveStoredPlacements(items: Placement[]) {
+  try { localStorage.setItem(EDITOR_KEY, JSON.stringify(items)); } catch { /* private mode */ }
+}

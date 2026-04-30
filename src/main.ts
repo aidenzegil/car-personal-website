@@ -653,6 +653,59 @@ async function buildFoliage(): Promise<void> {
 
 void buildFoliage().catch((err) => console.error('foliage load failed', err));
 
+// ---- User placements (from world editor) ----
+//
+// The /editor.html page lets the user drop assets into the world. The
+// committed placements live in localStorage; we read them here and
+// spawn each one into the scene, riding the intro wave like the
+// procedural foliage. Each instance binds to the tile beneath it so
+// its Y tracks the tile's rise/sink during intro and teardown.
+import {
+  PLACEABLES as PLACEABLE_DEFS,
+  loadPlaceable as loadPlaceableAsset,
+  loadStoredPlacements,
+  Placement as UserPlacement,
+} from './shared/placeables';
+
+interface UserPlacedInstance {
+  obj: THREE.Object3D;
+  tileIdx: number;
+  groundOffsetY: number;
+}
+const userPlaced: UserPlacedInstance[] = [];
+let userPlacementsReady = false;
+
+function userTileIdxFor(x: number, z: number): number {
+  const ix = Math.round(x / FLOOR_TILE_SIZE + FLOOR_TILE_HALF);
+  const iz = Math.round(z / FLOOR_TILE_SIZE + FLOOR_TILE_HALF);
+  if (ix < 0 || ix >= FLOOR_TILE_COUNT || iz < 0 || iz >= FLOOR_TILE_COUNT) return -1;
+  return ix * FLOOR_TILE_COUNT + iz;
+}
+
+async function buildUserPlacements(): Promise<void> {
+  const placements = loadStoredPlacements();
+  await Promise.all(placements.map(async (p: UserPlacement) => {
+    const def = PLACEABLE_DEFS.find((d) => d.id === p.assetId);
+    if (!def) return;
+    let obj: THREE.Object3D;
+    try { obj = await loadPlaceableAsset(def); }
+    catch (err) { console.warn('skipping placement, asset failed to load', p, err); return; }
+    obj.scale.multiplyScalar(p.scale);
+    obj.rotation.y = p.rotY;
+    applyVoidToTree(obj);
+    obj.traverse((node) => {
+      if ((node as THREE.Mesh).isMesh) (node as THREE.Mesh).castShadow = true;
+    });
+    const box = new THREE.Box3().setFromObject(obj);
+    const groundOffsetY = -box.min.y;
+    obj.position.set(p.x, -INTRO_DROP, p.z);
+    scene.add(obj);
+    userPlaced.push({ obj, tileIdx: userTileIdxFor(p.x, p.z), groundOffsetY });
+  }));
+  userPlacementsReady = true;
+}
+void buildUserPlacements().catch((err) => console.error('user placements load failed', err));
+
 // ---- Smoke particles + foliage collision ----
 //
 // Pooled InstancedMesh of small white spheres. When the car runs into
@@ -1622,9 +1675,9 @@ async function swapActiveCar(targetId: string) {
 function tickIntro(t: number) {
   if (introDone) return;
   if (introStartTime < 0) {
-    // Wait for both the car AND the foliage scatter so the scene rises
-    // as one cohesive piece — otherwise trees pop in mid-rise.
-    if (!carLoaded || !foliageReady) return;
+    // Wait for the car, the procedural foliage scatter, AND any user
+    // placements from the editor so everything rises as one piece.
+    if (!carLoaded || !foliageReady || !userPlacementsReady) return;
     introStartTime = t;
   }
   const elapsed = t - introStartTime;
@@ -1650,6 +1703,16 @@ function tickIntro(t: number) {
     floorTiles.setMatrixAt(i, _floorMtx);
   }
   floorTiles.instanceMatrix.needsUpdate = true;
+
+  // User placements ride their tile too.
+  for (const inst of userPlaced) {
+    if (inst.tileIdx < 0) {
+      inst.obj.position.y = inst.groundOffsetY;
+      continue;
+    }
+    const tileY = tileYAtIntroElapsed(inst.tileIdx, worldElapsed);
+    inst.obj.position.y = tileY + inst.groundOffsetY;
+  }
 
   // Foliage rides on top of its tile — Y derived from the tile's
   // current intro state so trees rise out of the void in lockstep with
@@ -1711,6 +1774,12 @@ function tickTeardown(t: number) {
       writeFoliageMatrix(grp, i, tileYs[grp.instances[i]!.tileIdx]!);
     }
     grp.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  // User placements: ride down with their tile.
+  for (const inst of userPlaced) {
+    if (inst.tileIdx < 0) continue;
+    inst.obj.position.y = tileYs[inst.tileIdx]! + inst.groundOffsetY;
   }
 
   // Car: drops last, after the world wave is mostly clear. Lerp from the
@@ -1903,6 +1972,9 @@ function resetMap() {
     }
     grp.mesh.instanceMatrix.needsUpdate = true;
   }
+
+  // User placements: push back to sunken Y so the intro re-lifts them.
+  for (const inst of userPlaced) inst.obj.position.y = -INTRO_DROP;
 
   // Drop any in-flight smoke puffs so the new run starts clean.
   clearSmoke();
