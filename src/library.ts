@@ -10,6 +10,7 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { CSS3DRenderer, CSS3DObject } from 'three/examples/jsm/renderers/CSS3DRenderer.js';
 import {
   attachHover, tickHover,
   polishCarMaterials,
@@ -349,6 +350,94 @@ const ASSETS: AssetEntry[] = [
       return root;
     },
   },
+  {
+    category: 'electronics',
+    name: 'IBM 3178 Monitor (HTML)',
+    source: '/models/electronics/ibm_3178.glb',
+    dot: '#22d3ee',
+    notes: 'Full monitor (chassis + clipped base) with a real iframe mounted on the CRT face via CSS3DRenderer. The display mesh is used as a stencil mask that punches a screen-shaped hole in the chassis, so the iframe behind the alpha-cleared canvas shows through cleanly. Drag to orbit — the iframe transforms with the scene.',
+    async build() {
+      const gltf = await glbLoader.loadAsync('/models/electronics/ibm_3178.glb');
+      const root = new THREE.Group();
+      root.name = 'ibm-3178-monitor-html';
+      const allow = new Set(['ibm_3178', 'display']);
+      let displayMesh: THREE.Mesh | null = null;
+      let chassisMesh: THREE.Mesh | null = null;
+      gltf.scene.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!(mesh as any).isMesh) return;
+        const mat = mesh.material as THREE.Material | THREE.Material[];
+        const matName = Array.isArray(mat) ? mat[0]?.name : mat?.name;
+        if (!matName || !allow.has(matName)) return;
+        mesh.updateWorldMatrix(true, false);
+        const m = mesh.clone(false);
+        m.matrix.copy(mesh.matrixWorld);
+        m.matrix.decompose(m.position, m.quaternion, m.scale);
+        if (matName === 'display') displayMesh = m;
+        else if (matName === 'ibm_3178') chassisMesh = m;
+        root.add(m);
+      });
+      clipBelowWorldYFraction(root, 0.28);
+      const box = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if (maxDim > 0) root.scale.multiplyScalar(2.0 / maxDim);
+      if (displayMesh && chassisMesh) {
+        // Punch a transparent hole through the canvas in the display
+        // mesh's shape so the iframe (composed *behind* the WebGL
+        // canvas via CSS3DRenderer) shows through. Without this the
+        // chassis paints opaquely over the iframe.
+        void chassisMesh; // chassis renders normally
+        makeMeshAlphaHole(displayMesh);
+        mountHtmlOnMesh(displayMesh, DEMO_TERMINAL_HTML);
+      }
+      return root;
+    },
+  },
+  {
+    category: 'electronics',
+    name: 'IBM 3178 Display (HTML)',
+    source: '/models/electronics/ibm_3178.glb',
+    dot: '#84cc16',
+    notes: 'Just the CRT panel mesh from the IBM 3178 GLB, with a real iframe mounted on its front face via CSS3DRenderer. Drag to orbit — the iframe transforms with the 3D scene. Used as a development target for the larger "monitor with HTML" showcase.',
+    async build() {
+      const gltf = await glbLoader.loadAsync('/models/electronics/ibm_3178.glb');
+      const root = new THREE.Group();
+      root.name = 'ibm-3178-display-html';
+      let displayMesh: THREE.Mesh | null = null;
+      gltf.scene.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!(mesh as any).isMesh) return;
+        const mat = mesh.material as THREE.Material | THREE.Material[];
+        const name = Array.isArray(mat) ? mat[0]?.name : mat?.name;
+        if (name !== 'display') return;
+        mesh.updateWorldMatrix(true, false);
+        const m = mesh.clone(false);
+        m.matrix.copy(mesh.matrixWorld);
+        m.matrix.decompose(m.position, m.quaternion, m.scale);
+        // Hide the WebGL display panel so the alpha-cleared canvas
+        // reveals the CSS3D iframe behind. We hide the *material*
+        // rather than the mesh — `mesh.visible = false` would also
+        // make CSS3DRenderer skip the mesh's children, which would
+        // include our iframe CSS3DObject.
+        const cMat = m.material as THREE.Material | THREE.Material[];
+        if (Array.isArray(cMat)) cMat.forEach((x) => { x.visible = false; });
+        else cMat.visible = false;
+        root.add(m);
+        displayMesh = m;
+      });
+      const box = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if (maxDim > 0) root.scale.multiplyScalar(2.0 / maxDim);
+      if (displayMesh) {
+        mountHtmlOnMesh(displayMesh, DEMO_TERMINAL_HTML);
+      }
+      return root;
+    },
+  },
   // ---- Characters ----
   {
     category: 'character',
@@ -489,14 +578,184 @@ const infoName = document.getElementById('info-name') as HTMLElement;
 const infoSource = document.getElementById('info-source') as HTMLElement;
 const infoNotes = document.getElementById('info-notes') as HTMLElement;
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, stencil: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.25;
+// Don't auto-clear the WebGL color — the CSS3D layer is *behind* the
+// canvas, so we need transparent fragments where there's no 3D
+// geometry to let the iframe show through. We still clear depth and
+// stencil per-frame; only the color buffer is left as-is.
+renderer.setClearAlpha(0);
+
+// CSS3DRenderer renders DOM elements (iframes, divs) using CSS 3D
+// transforms. We layer it BEHIND the WebGL canvas so opaque 3D
+// geometry naturally occludes the iframe, while transparent regions
+// of the WebGL canvas reveal it. This is the standard recipe for
+// "interactive web content on a 3D screen surface."
+const cssRenderer = new CSS3DRenderer();
+const cssLayer = cssRenderer.domElement;
+cssLayer.style.position = 'absolute';
+cssLayer.style.top = '0';
+cssLayer.style.left = '0';
+// Block iframe interaction by default — without this, the iframe
+// swallows pointer events and OrbitControls stops working. Specific
+// iframes can opt back in via element.style.pointerEvents = 'auto'.
+cssLayer.style.pointerEvents = 'none';
+// Make sure the CSS layer sits behind the WebGL canvas in stacking
+// order so the WebGL pixels paint on top.
+cssLayer.style.zIndex = '0';
+canvas.style.position = 'relative';
+canvas.style.zIndex = '1';
+canvas.parentElement!.appendChild(cssLayer);
+
+// ---- HTML-on-mesh helper ----
+//
+// Mount an iframe (or arbitrary HTMLElement) onto the front face of
+// a mesh, sized to its local-bbox dimensions. The CSS3DObject is
+// added as a child of the mesh, so any rotation/scale on the mesh's
+// parent chain is inherited automatically — no need to recompute the
+// transform when the parent moves.
+//
+// The "front face" is taken to be the plane perpendicular to the
+// mesh's smallest local-bbox dimension. For the IBM 3178 display
+// mesh that's the screen plane (it's modelled as a thin slab with
+// the screen face being the largest two axes).
+function mountHtmlOnMesh(
+  mesh: THREE.Mesh,
+  html: string,
+  opts?: { density?: number; backgroundColor?: string },
+): { css: CSS3DObject; iframe: HTMLIFrameElement } {
+  mesh.geometry.computeBoundingBox();
+  const lbbox = mesh.geometry.boundingBox!;
+  const lsize = new THREE.Vector3(); lbbox.getSize(lsize);
+  const lcenter = new THREE.Vector3(); lbbox.getCenter(lcenter);
+  // Sort local axes by extent. Smallest = depth (screen-normal axis).
+  const dims = [
+    { axis: 0, size: lsize.x },
+    { axis: 1, size: lsize.y },
+    { axis: 2, size: lsize.z },
+  ].sort((a, b) => a.size - b.size);
+  const depthAxis = dims[0]!.axis;
+  const planeAxes = dims.slice(1).sort((a, b) => b.size - a.size);
+  const wAxisIdx = planeAxes[0]!.axis;  // larger non-depth axis = screen width
+  const wLocal = planeAxes[0]!.size;
+  const hLocal = planeAxes[1]!.size;
+
+  // Determine which side of the slab is the screen "front" by summing
+  // vertex normals along the depth axis — for a slab with a bowed
+  // CRT face, the front face contributes far more to the sum than
+  // the (often missing or flat) back face. Sign tells us +depthAxis
+  // or -depthAxis is the outward direction.
+  const normalAttr = mesh.geometry.attributes.normal as THREE.BufferAttribute | undefined;
+  let normalSum = 0;
+  if (normalAttr) {
+    for (let i = 0; i < normalAttr.count; i++) {
+      normalSum += normalAttr.getComponent(i, depthAxis);
+    }
+  }
+  const depthSign = normalSum >= 0 ? 1 : -1;
+
+  // Build a right-handed orthonormal basis where:
+  //   ez = +screen-out direction (in mesh-local space)
+  //   ey = "screen up" — chosen so that AFTER the parent's world
+  //        rotation composes in, the iframe's local +Y still points
+  //        roughly along world +Y (text renders right-side up).
+  //   ex = ey × ez, perpendicular to both
+  // We pick a tentative ex along +wAxis, derive ey = ez × ex, then
+  // flip ex if ey ends up pointing downward in world space.
+  mesh.updateWorldMatrix(true, false);
+  const meshWorldRot = new THREE.Quaternion();
+  mesh.matrixWorld.decompose(new THREE.Vector3(), meshWorldRot, new THREE.Vector3());
+  const ez = new THREE.Vector3().setComponent(depthAxis, depthSign);
+  let ex = new THREE.Vector3().setComponent(wAxisIdx, 1);
+  let ey = new THREE.Vector3().crossVectors(ez, ex);
+  const eyWorldY = ey.clone().applyQuaternion(meshWorldRot).y;
+  if (eyWorldY < 0) {
+    ex.negate();
+    ey = new THREE.Vector3().crossVectors(ez, ex);
+  }
+
+  const density = opts?.density ?? 80;
+  const wPx = Math.max(64, Math.round(wLocal * density));
+  const hPx = Math.max(64, Math.round(hLocal * density));
+  const iframe = document.createElement('iframe');
+  iframe.srcdoc = html;
+  iframe.style.border = '0';
+  iframe.style.background = opts?.backgroundColor ?? '#000';
+  iframe.style.width = `${wPx}px`;
+  iframe.style.height = `${hPx}px`;
+  // The CSS3D layer's pointer-events is none (so OrbitControls keeps
+  // working); re-enable on the iframe itself for interaction.
+  iframe.style.pointerEvents = 'auto';
+  const css = new CSS3DObject(iframe);
+  // Push the iframe forward to the slab's front face so it pops out
+  // in front of any case interior geometry behind it (the IBM display
+  // is modelled as a thin slab; the bbox center sits inside the
+  // chassis cavity and gets occluded by the back wall of the case).
+  const halfDepth = lsize.getComponent(depthAxis) / 2;
+  css.position.copy(lcenter).addScaledVector(ez, halfDepth);
+  css.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(ex, ey, ez));
+  // 1 world-unit = `density` pixels. Scaling the CSS3DObject down by
+  // 1/density makes the iframe's CSS pixel dimensions match the mesh's
+  // local-bbox world size after the parent's transform composes in.
+  css.scale.setScalar(1 / density);
+  mesh.add(css);
+  return { css, iframe };
+}
+
+/** Punch a transparent (alpha=0) hole through the WebGL canvas in the
+ *  shape of this mesh. Used to expose CSS3D content positioned behind
+ *  the canvas. The mesh renders LAST (positive renderOrder + transparent)
+ *  with NoBlending so its (rgba=0,0,0,0) fragment overwrites whatever
+ *  was already painted there — turning that region of the canvas
+ *  fully transparent. */
+function makeMeshAlphaHole(mesh: THREE.Mesh) {
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  for (const m of mats) {
+    m.transparent = true;
+    m.opacity = 0;
+    m.depthWrite = false;
+    m.blending = THREE.NoBlending;
+  }
+  // Render after the chassis so we *overwrite* its pixels in the
+  // screen region. (Default blending would preserve dest alpha; we
+  // need NoBlending so source rgba=0,0,0,0 fully overwrites.)
+  mesh.renderOrder = 1;
+}
+
+// Demo content — vintage terminal text styled to match the IBM 3178's
+// own baked screen texture (green phosphor on black).
+const DEMO_TERMINAL_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #4ade80;
+    font-family: "Courier New", ui-monospace, monospace; font-size: 14px; line-height: 1.35;
+    overflow: hidden; padding: 14px 20px; box-sizing: border-box; }
+  .blink { animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  h1 { font-size: 14px; margin: 0 0 8px 0; color: #fde047; }
+</style></head><body>
+<h1>SHALL WE PLAY A GAME?</h1>
+<div>BRIDGE</div>
+<div>CHECKERS</div>
+<div>CHESS</div>
+<div>POKER</div>
+<div>FIGHTER COMBAT</div>
+<div>GUERILLA ENGAGEMENT</div>
+<div>DESERT WARFARE</div>
+<div>AIR-TO-GROUND ACTIONS</div>
+<div>THEATERWIDE TACTICAL WARFARE</div>
+<div>THEATERWIDE BIOTOXIC AND CHEMICAL WARFARE</div>
+<div style="color:#fde047;margin-top:6px;">GLOBAL THERMONUCLEAR WAR</div>
+<div style="margin-top:14px;">> <span class="blink">_</span></div>
+</body></html>`;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x060912);
+// scene.background is intentionally null so the alpha-cleared WebGL
+// canvas reveals the CSS3D iframe layer behind it. The dark page bg
+// (#060912 on <body>) shows through the empty regions instead, so
+// visually it's identical to the previous solid-bg setup.
 scene.fog = new THREE.Fog(0x060912, 8, 22);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
@@ -1034,6 +1293,7 @@ function tick() {
   }
   controls.update();
   renderer.render(scene, camera);
+  cssRenderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
 
@@ -1047,6 +1307,7 @@ function tick() {
   THREE,
   scene, camera, controls,
   glbLoader,
+  cssRenderer, cssLayer,
   get assets() { return ASSETS.map((a) => ({ name: a.name, source: a.source })); },
   get activeIndex() { return activeIndex; },
   get activeAsset() { return activeAsset; },
@@ -1080,6 +1341,7 @@ function resize() {
   const wrap = canvas.parentElement!;
   const w = wrap.clientWidth, h = wrap.clientHeight;
   renderer.setSize(w, h, false);
+  cssRenderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }

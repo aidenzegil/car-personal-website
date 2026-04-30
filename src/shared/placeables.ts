@@ -119,6 +119,9 @@ export const PLACEABLES: PlaceableDef[] = [
   { id: 'Log2',    category: 'prop', label: 'Log B',   dot: '#a16207', targetSize: 2.5, source: '/models/nature/Log2.obj' },
   // Electronics
   { id: 'IBM_3178', category: 'electronics', label: 'IBM 3178', dot: '#a3a3a3', targetSize: 4, source: '/models/electronics/ibm_3178.glb' },
+  // Display panel only — just the CRT face mesh. Useful as a target
+  // surface for HTML/iframe overlay (flatter, no chassis to occlude).
+  { id: 'IBM_3178_Display', category: 'electronics', label: 'IBM 3178 Display', dot: '#84cc16', targetSize: 2.5, source: '/models/electronics/ibm_3178.glb', materialFilter: 'display' },
   // Monitor unit only — chassis (`ibm_3178`) + CRT panel (`display`),
   // keyboard mesh stripped. Same source GLB as the full terminal.
   // Chassis mesh contains BOTH the monitor case and the bottom base
