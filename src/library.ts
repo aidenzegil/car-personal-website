@@ -147,6 +147,49 @@ async function buildWheeledCar(
   return group;
 }
 
+// Farmer diffuse — the FBX references its texture by relative path that
+// doesn't survive a web export, so we apply this map manually after load
+// (same pattern as the corgi). Loaded once at module scope and reused.
+const farmerDiffuseTex = new THREE.TextureLoader().load('/models/farmer-texture.png');
+farmerDiffuseTex.colorSpace = THREE.SRGBColorSpace;
+farmerDiffuseTex.anisotropy = 4;
+
+function recolorFarmerMaterials(root: THREE.Object3D) {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh & { isSkinnedMesh?: boolean };
+    if (!(mesh as any).isMesh && !mesh.isSkinnedMesh) return;
+    const replacement = new THREE.MeshStandardMaterial({
+      map: farmerDiffuseTex,
+      roughness: 0.8,
+      metalness: 0,
+    });
+    const m = mesh.material;
+    if (Array.isArray(m)) m.forEach((mm) => mm.dispose?.());
+    else (m as THREE.Material | undefined)?.dispose?.();
+    mesh.material = replacement;
+  });
+}
+
+// Farmer animation catalog — same shape as CORGI_CLIPS. Order drives the
+// picker UI; grouped roughly locomotion → combat → tools.
+const FARMER_CLIPS = [
+  // Locomotion / pose
+  'idle', 'walk', 'run', 'jump', 'fall', 'land',
+  // Interaction
+  'grab_low',
+  // Combat
+  'attack_a', 'attack_b',
+  // Tool work
+  'work_hoe', 'work_shovel', 'work_rake',
+  'work_hammer_low', 'work_hammer_medium', 'work_hammer_high',
+];
+
+/** Convert a farmer clip filename stem ("work_hammer_high") into a
+ *  picker-friendly label ("Work Hammer High"). */
+function humanizeFarmerClip(id: string): string {
+  return id.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 const ASSETS: AssetEntry[] = [
   {
     category: 'vehicle',
@@ -287,6 +330,32 @@ const ASSETS: AssetEntry[] = [
           source: `/models/corgi/${id}.fbx`,
         })),
         defaultClipId: 'CorgiIdle',
+      });
+    },
+  },
+  {
+    category: 'character',
+    name: 'Farmer',
+    source: '/models/farmer.fbx',
+    dot: '#60a5fa',
+    notes: 'Skinned farmer (FBX) ported from farmer-game. 15 sibling animation FBX clips on the same skeleton — locomotion, combat, and tool work. Use the picker below to swap clips on the fly; they load on-demand.',
+    async build() {
+      return buildAnimatedFbx({
+        source: '/models/farmer.fbx',
+        groupName: 'farmer',
+        // Farmer FBX is authored Z-up. Tilt onto the platform's Y-up
+        // frame the same way farmer-game does at game-load time.
+        rotationX: -Math.PI / 2,
+        // The pack's default scalar of 0.012 is corgi-tuned and reads
+        // tiny on the farmer; 0.01 puts him at car-comparable height.
+        scale: 0.01,
+        recolor: recolorFarmerMaterials,
+        clips: FARMER_CLIPS.map((id) => ({
+          id,
+          label: humanizeFarmerClip(id),
+          source: `/models/animations/${id}.fbx`,
+        })),
+        defaultClipId: 'idle',
       });
     },
   },
@@ -540,6 +609,18 @@ async function buildAnimatedFbx(opts: {
   groupName: string;
   clips: AnimatedFbxClipDef[];
   defaultClipId?: string;
+  /** Override the default 0.012 starting scale (corgi-tuned). The
+   *  per-asset bbox-center pass normalizes final on-screen size, but
+   *  this number determines the magnitude the AnimationMixer sees, so
+   *  packs with different authored units want different starting values. */
+  scale?: number;
+  /** Tilt around X — used for FBX packs authored Z-up that need to lie
+   *  flat on the Y-up showcase platform. */
+  rotationX?: number;
+  /** Per-pack material override. Defaults to the corgi recolor since
+   *  that's the historical caller; farmer + future packs that ship
+   *  with their own diffuse pass their own. */
+  recolor?: (root: THREE.Object3D) => void;
 }): Promise<THREE.Object3D> {
   const root = await loader.loadAsync(opts.source);
   root.name = opts.groupName;
@@ -547,10 +628,11 @@ async function buildAnimatedFbx(opts: {
   // size is normalized later by the library's per-asset bbox-center
   // pass, but multiply by a sane scalar here so the AnimationMixer
   // sees realistic motion magnitudes (root motion is in source units).
-  root.scale.setScalar(0.012);
+  root.scale.setScalar(opts.scale ?? 0.012);
+  if (opts.rotationX !== undefined) root.rotation.x = opts.rotationX;
   // FBX shipped without its referenced texture files — every mesh
   // slot ends up as a black silhouette unless we paint them.
-  recolorCorgiMaterials(root);
+  (opts.recolor ?? recolorCorgiMaterials)(root);
 
   const mixer = new THREE.AnimationMixer(root);
   const loaded = new Map<string, THREE.AnimationClip>();
@@ -891,7 +973,8 @@ function tick() {
   if (activeAsset) {
     tickHover(activeAsset, dt, t);
     // Animation clips baked into the asset (e.g. propeller spin on the
-    // aircraft glb). Mixer is null for assets without animations.
+    // aircraft glb, farmer/corgi clip swaps). Mixer is null for assets
+    // without animations.
     const mixer = (activeAsset.userData as any).mixer as THREE.AnimationMixer | undefined;
     if (mixer) mixer.update(dt);
     const wheelState = (activeAsset.userData as any).carWheels as CarWheelState | undefined;
