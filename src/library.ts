@@ -257,6 +257,16 @@ const ASSETS: AssetEntry[] = [
       const gltf = await glbLoader.loadAsync('/models/electronics/ibm_3178.glb');
       const root = gltf.scene;
       root.name = 'ibm-3178';
+      // The Sketchfab IBM GLB is exported at a scale that hugs the
+      // platform camera — without this normalize the screen face fills
+      // the whole viewport. Shrink so the terminal sits comfortably
+      // in frame at the default camera distance, with room around it
+      // (a desk-toy sized object on the showcase platform).
+      const box = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if (maxDim > 0) root.scale.multiplyScalar(2.0 / maxDim);
       return root;
     },
   },
